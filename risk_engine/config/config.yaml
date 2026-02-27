@@ -1,0 +1,20 @@
+severity_weights:
+  critical: 10
+  high: 7
+  medium: 4
+  low: 2
+  info: 1
+
+domain_weights:
+  security: 0.45
+  cost: 0.25
+  compliance: 0.20
+  change_impact: 0.10
+
+risk_thresholds:
+  fail: 70
+  review: 40
+
+hard_fail_rules:
+  - critical_security
+  - cost_spike_100
