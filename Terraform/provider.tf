@@ -9,7 +9,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket  = "iac-risk-intelligence-state"
+    bucket  = "iac-risk-intelligence-state" 
     key     = "terraform/state.tfstate"
     region  = "us-east-1"
     encrypt = true
