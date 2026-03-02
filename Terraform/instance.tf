@@ -3,6 +3,6 @@
     key_name = "my_key_pair"
     instance_type = "t2.micro"
     tags = {
-        Name = "WebServer"
+        Name = "WebServer-"
     }
  }
