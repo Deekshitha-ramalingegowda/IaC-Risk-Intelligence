@@ -34,7 +34,7 @@ jobs:
       env:
         GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
       run: |
-        python scripts/analyze_with_grok.py
+        python scripts/analyze.py
 
     - name: Post PR Comment
       env:
