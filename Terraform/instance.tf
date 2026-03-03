@@ -4,7 +4,8 @@
     instance_type = "t2.micro"
     subnet_id              = aws_subnet.public_subnet.id
     vpc_security_group_ids = [aws_security_group.ec2_sg.id]
-    
+    ebs_optimized = true
+
     tags = {
         Name = "WebServer"
     }
