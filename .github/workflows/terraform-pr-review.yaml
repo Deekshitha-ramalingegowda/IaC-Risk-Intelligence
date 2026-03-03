@@ -1,0 +1,44 @@
+name: Terraform AI Security Review
+
+on:
+  pull_request:
+
+jobs:
+  security-review:
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Install Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.11
+
+    - name: Install Dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Install Checkov
+      run: pip install checkov
+
+    - name: Run Checkov Scan
+      run: |
+        checkov -d terraform \
+        -o json \
+        --soft-fail > checkov_report.json
+
+    - name: Run Grok Analysis
+      env:
+        GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+      run: |
+        python scripts/analyze_with_grok.py
+
+    - name: Post PR Comment
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        python scripts/post_pr_comment.py
