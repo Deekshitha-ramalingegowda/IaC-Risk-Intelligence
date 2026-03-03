@@ -26,13 +26,13 @@ jobs:
 
     - name: Run Checkov Scan
       run: |
-        checkov -d terraform \
+        checkov -d Terraform \
         -o json \
         --soft-fail > checkov_report.json
 
-    - name: Run Grok Analysis
+    - name: Run Gemini Analysis
       env:
-        GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       run: |
         python scripts/analyze.py
 
