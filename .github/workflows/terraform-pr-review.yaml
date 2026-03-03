@@ -2,7 +2,10 @@ name: Terraform AI Security Review
 
 on:
   pull_request:
-
+permissions:                  
+  contents: read              
+  pull-requests: write        
+  issues: write
 jobs:
   security-review:
     runs-on: ubuntu-latest
@@ -30,11 +33,11 @@ jobs:
         -o json \
         --soft-fail > checkov_report.json
 
-    - name: Run Gemini Analysis
+    - name: Run Gemini Analysis               
       env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}   
       run: |
-        python scripts/analyze.py
+        python scripts/analyze.py     
 
     - name: Post PR Comment
       env:
