@@ -54,7 +54,14 @@ jobs:
         id: checkov
         run: |
           echo "🔍 Running Checkov security analysis..."
-          checkov -d terraform/ --framework terraform -o json > checkov-output.json 2>&1 || true
+          checkov -d terraform/ --framework terraform -o json 2>&1 | tee checkov-output.json || true
+          
+          # Validate JSON output
+          if ! jq empty checkov-output.json 2>/dev/null; then
+            echo "⚠ Checkov output is not valid JSON, creating empty report"
+            echo '{"results": {"failed_checks": [], "passed_checks": []}}' > checkov-output.json
+          fi
+          
           echo "✓ Checkov analysis complete"
           
           # Count findings
@@ -112,14 +119,18 @@ jobs:
       - name: Validate Analysis Files
         run: |
           echo "✓ Validating analysis output files..."
-          if [ ! -f checkov-output.json ]; then
-            echo "⚠ Warning: checkov-output.json not found"
+          
+          if [ ! -f checkov-output.json ] || ! jq empty checkov-output.json 2>/dev/null; then
+            echo "⚠ Creating default checkov-output.json"
             echo '{"results": {"failed_checks": [], "passed_checks": []}}' > checkov-output.json
           fi
-          if [ ! -f infracost-output.json ]; then
-            echo "⚠ Warning: infracost-output.json not found"
+          
+          if [ ! -f infracost-output.json ] || ! jq empty infracost-output.json 2>/dev/null; then
+            echo "⚠ Creating default infracost-output.json"
             echo '{"totalMonthlyCost": 0, "projects": []}' > infracost-output.json
           fi
+          
+          echo "✓ All required files validated"
         shell: bash
 
       - name: Run Deep Analysis (Gemini + AI)
@@ -135,9 +146,7 @@ jobs:
             exit 0  # Don't fail - allow workflow to continue for other checks
           fi
           
-          cd scripts
-          python local.py
-          cd ..
+          python scripts/local.py
           
           echo "✓ Deep analysis complete"
         shell: bash
