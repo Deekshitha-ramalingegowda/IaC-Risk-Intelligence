@@ -367,120 +367,92 @@ Be specific with amounts and actionable recommendations."""
 # ============================================================================
 
 def build_security_deep_prompt(checkov_data):
-    """Create deep security analysis prompt that references actual Terraform source lines."""
+    """Build a compact, PR-comment-ready security prompt from Checkov findings + TF source."""
 
     failed_checks = checkov_data.get("results", {}).get("failed_checks", [])
 
-    # ── Build a structured finding list with file + line range ──────────────
-    checks_by_resource: dict = {}
+    # ── Collect per-check detail: id, name, resource, file, lines, code snippet ──
+    findings = []
     for check in failed_checks:
-        resource  = check.get("resource", "unknown")
-        file_path = check.get("file_path", "")
-        # Checkov reports line numbers under file_line_range or code_block
-        line_range = check.get("file_line_range", [])
-        code_block = check.get("code_block", [])  # list of [line_no, code_text]
-
-        if resource not in checks_by_resource:
-            checks_by_resource[resource] = {
-                "file": file_path,
-                "line_range": line_range,
-                "checks": [],
-                "code_snippet": code_block,
-            }
-        checks_by_resource[resource]["checks"].append({
-            "id":   check.get("check_id", ""),
-            "name": check.get("check_name", ""),
+        line_range  = check.get("file_line_range", [])
+        code_block  = check.get("code_block", [])   # [[line_no, text], ...]
+        snippet     = "\n".join(
+            f"{ln}: {code.rstrip()}" for ln, code in (code_block or [])[:8]
+        )
+        findings.append({
+            "id":       check.get("check_id", ""),
+            "name":     check.get("check_name", ""),
+            "resource": check.get("resource", "unknown"),
+            "file":     check.get("file_path", ""),
+            "lines":    f"{line_range[0]}-{line_range[1]}" if len(line_range) == 2 else "",
+            "snippet":  snippet,
         })
 
-    # ── Build findings text ──────────────────────────────────────────────────
-    findings_lines = [f"Total failed checks: {len(failed_checks)}\n"]
-    for resource, info in sorted(checks_by_resource.items())[:25]:
-        loc = f"{info['file']}" + (f" lines {info['line_range']}" if info["line_range"] else "")
-        findings_lines.append(f"\nRESOURCE: {resource}  ({loc})")
-        for c in info["checks"][:6]:
-            findings_lines.append(f"  [{c['id']}] {c['name']}")
-        if info["code_snippet"]:
-            snippet = "\n".join(f"    {ln}: {code}" for ln, code in info["code_snippet"][:15])
-            findings_lines.append(f"  Current code:\n{snippet}")
+    # ── Serialise findings for the prompt ────────────────────────────────────
+    findings_text = ""
+    for f in findings[:30]:
+        loc = f"{f['file']}:{f['lines']}" if f["lines"] else f["file"]
+        findings_text += (
+            f"\n[{f['id']}] {f['resource']}  ({loc})\n"
+            f"  Rule: {f['name']}\n"
+        )
+        if f["snippet"]:
+            findings_text += f"  Code:\n    {f['snippet'].replace(chr(10), chr(10)+'    ')}\n"
 
-    findings_text = "\n".join(findings_lines)
-
-    # ── Load actual .tf source for reference ────────────────────────────────
     tf_sources = load_terraform_sources()
-    tf_section = ""
-    if tf_sources:
-        tf_section = f"""
-FULL TERRAFORM SOURCE (use line numbers to pinpoint issues):
-{tf_sources[:12000]}
-"""
+    tf_section = f"\nTERRAFORM SOURCE:\n{tf_sources[:10000]}\n" if tf_sources else ""
 
-    return f"""You are a senior security architect performing a deep code review of Terraform infrastructure.
+    return f"""You are a Terraform security reviewer writing a GitHub PR comment.
 
-You have BOTH the Checkov findings (with file/line references) AND the actual Terraform source code below.
-Your job is to produce a precise, developer-ready security report — not generic advice.
-
-══════════════════════════════════════════════════════
-CHECKOV FINDINGS
-══════════════════════════════════════════════════════
+CHECKOV FINDINGS  ({len(failed_checks)} failed checks):
 {findings_text}
 {tf_section}
-══════════════════════════════════════════════════════
-REQUIRED OUTPUT FORMAT
-══════════════════════════════════════════════════════
 
-For EVERY failed resource above, produce one block in this exact format:
+OUTPUT RULES — follow exactly, no exceptions:
+- Write ONLY the findings table and per-finding fix blocks below.
+- No introductions, no summaries, no explanations outside the blocks.
+- Every finding must reference the EXACT offending line(s) from the source above.
+- Keep "Why risky" to one sentence. Keep "Fix" to the minimum changed lines only.
+
+══════════════════════════════
+OUTPUT FORMAT
+══════════════════════════════
+
+## 🔒 Security Findings
+
+| # | Severity | Check | Resource | File:Line |
+|---|----------|-------|----------|-----------|
+(one row per finding, severity = CRITICAL/HIGH/MEDIUM/LOW)
 
 ---
-### [CHECK_ID] · SEVERITY · resource_type.resource_name
 
-**File & line:** `<file_path>:<line_start>-<line_end>`
+Then for each CRITICAL and HIGH finding only, one block:
 
-**What the current code does wrong:**
-Quote the 1-3 offending lines from the source above and explain the exact risk
-(attack vector, what is exposed, blast radius).
+**[CHECK_ID] `resource_type.resource_name`** · `file:line`
 
-**Terraform fix — replace this:**
-```hcl
-# paste the CURRENT bad block/attribute (from source)
-```
-**with this:**
-```hcl
-# paste the CORRECTED block/attribute with only the minimum change required
+> ⚠️ Why risky: _one sentence — name the exact attack or exposure_
+
+```diff
+- <the exact bad line(s) from source>
++ <the corrected line(s) — minimum change only>
 ```
 
-**Why this fix works:** One sentence.
+> ✅ Fix: _one sentence on what this change does_
 
-**Effort:** X minutes · **Downtime:** None / Minimal / Rolling restart required
-**Compliance impact:** list any CIS / PCI-DSS / SOC2 controls satisfied by this fix
 ---
 
-After all per-finding blocks, add:
+After all blocks:
 
-## RISK SCORECARD
-| Resource | Top Check | Severity | Score /100 |
-|----------|-----------|----------|------------|
-(top 10 highest-risk resources)
-
-## REMEDIATION ROADMAP
-IMMEDIATE (fix before merge):
-- [ ] item — 1-sentence impact — X min effort
-
-SHORT-TERM (fix within 1 week):
-- [ ] item
-
-## INFRASTRUCTURE SECURITY GRADE
-Current: [A-F]   Target: A+
-Merge recommendation: APPROVE / REQUEST CHANGES / BLOCK
-
-Be surgical. Quote actual lines. Show exact diffs. No padding."""
+**Security verdict:** `BLOCK` / `REQUEST CHANGES` / `APPROVE`
+Blockers before merge: list check IDs only, one line each."""
 
 
 def build_cost_deep_prompt(infracost_data):
-    """Create deep cost analysis prompt that cross-references Terraform source."""
+    """Build a compact, PR-comment-ready cost prompt from Infracost data + TF source."""
 
     total_cost = float(infracost_data.get('totalMonthlyCost', 0) or 0)
 
-    # ── Extract per-resource cost data ──────────────────────────────────────
+    # ── Extract per-resource costs with components ────────────────────────────
     resource_costs = []
     for project in infracost_data.get("projects", []):
         for resource in project.get("breakdown", {}).get("resources", []):
@@ -494,15 +466,12 @@ def build_cost_deep_prompt(infracost_data):
                     c = float(cost.get("monthlyCost") or 0)
                     monthly_cost += c
                     if c > 0:
-                        components.append({
-                            "desc":  cost.get("description", ""),
-                            "unit":  cost.get("unit", ""),
-                            "qty":   cost.get("monthlyQuantity", ""),
-                            "price": c,
-                        })
+                        components.append(
+                            f"{cost.get('description','')}: "
+                            f"{cost.get('monthlyQuantity','')} {cost.get('unit','')} = ${c:.2f}"
+                        )
                 except (ValueError, TypeError):
                     pass
-
             for sub in resource.get("subresources", []):
                 for cost in sub.get("costComponents", []):
                     try:
@@ -515,182 +484,112 @@ def build_cost_deep_prompt(infracost_data):
                     "name":       name,
                     "type":       resource_type,
                     "cost":       monthly_cost,
-                    "components": components[:4],
+                    "components": components[:3],
                 })
 
     resource_costs.sort(key=lambda x: x["cost"], reverse=True)
 
-    # ── Build cost summary text ──────────────────────────────────────────────
-    cost_lines = [
-        f"TOTAL MONTHLY COST : ${total_cost:.2f}",
-        f"TOTAL ANNUAL COST  : ${total_cost * 12:.2f}\n",
-        "TOP 10 RESOURCES BY COST:",
-    ]
-    for i, res in enumerate(resource_costs[:10], 1):
-        cost_lines.append(f"\n{i}. {res['name']}  ({res['type']})  →  ${res['cost']:.2f}/month")
-        for comp in res["components"]:
-            cost_lines.append(
-                f"   • {comp['desc']}: {comp['qty']} × {comp['unit']} = ${comp['price']:.2f}"
-            )
-
+    cost_lines = [f"Total monthly cost: ${total_cost:.2f}  (annual: ${total_cost*12:.2f})\n"]
+    for i, r in enumerate(resource_costs[:12], 1):
+        cost_lines.append(f"{i}. {r['name']} ({r['type']}): ${r['cost']:.2f}/mo")
+        for c in r["components"]:
+            cost_lines.append(f"   • {c}")
     cost_summary = "\n".join(cost_lines)
 
-    # ── Load Terraform source for context ────────────────────────────────────
     tf_sources = load_terraform_sources()
-    tf_section = ""
-    if tf_sources:
-        tf_section = f"""
-FULL TERRAFORM SOURCE (use resource names to find exact blocks):
-{tf_sources[:10000]}
-"""
+    tf_section = f"\nTERRAFORM SOURCE:\n{tf_sources[:10000]}\n" if tf_sources else ""
 
-    return f"""You are a cloud cost-optimization engineer reviewing AWS Terraform infrastructure.
+    return f"""You are a Terraform cost reviewer writing a GitHub PR comment.
 
-You have BOTH the Infracost breakdown AND the actual Terraform source.
-Produce a developer-ready cost optimisation report — quote exact resource blocks, show the replacement.
-
-══════════════════════════════════════════════════════
-INFRACOST BREAKDOWN
-══════════════════════════════════════════════════════
+INFRACOST BREAKDOWN:
 {cost_summary}
 {tf_section}
-══════════════════════════════════════════════════════
-REQUIRED OUTPUT FORMAT
-══════════════════════════════════════════════════════
 
-For each resource costing more than $50/month, produce one block:
+OUTPUT RULES — follow exactly, no exceptions:
+- Write ONLY the table and per-resource fix blocks below.
+- No introductions, no general advice paragraphs.
+- For each resource: quote the EXACT current attribute(s) from source, show ONLY the changed lines in diff format.
+- Keep "Why expensive" to one sentence. Sizing rationale to one sentence.
+
+══════════════════════════════
+OUTPUT FORMAT
+══════════════════════════════
+
+## 💰 Cost Findings
+
+| Resource | Current Config | $/mo | Recommended Config | New $/mo | Monthly Saving |
+|----------|---------------|------|--------------------|----------|----------------|
+(one row per resource costing > $20/mo — use actual resource names from Infracost)
+
+**Total potential saving: $XX/mo ($XX/yr)**
 
 ---
-### resource_type.resource_name — ${'{cost}'}/month
 
-**Current Terraform config (quote the relevant block from source):**
-```hcl
-# paste the current resource block or the key attributes
+Then for each resource costing > $50/month, one block:
+
+**`resource_type.resource_name`** · `$XX/mo`
+
+> 💸 Why expensive: _one sentence_
+
+```diff
+- <exact current attribute(s) from source — e.g. instance_type = "m5.2xlarge">
++ <replacement — e.g. instance_type = "t3.large">
 ```
 
-**Problem:** One sentence on why this is over-provisioned or wasteful.
+> 💡 Why sufficient: _one sentence on why the smaller size works_
+> ⏱ Effort: X min · Downtime: None / X-min window · Risk: Low/Medium
 
-**Recommended change:**
-```hcl
-# paste only the changed lines (keep everything else identical)
-```
-
-**Estimated new cost:** $XX/month  →  saving **$XX/month ($XX/year)**
-
-**Sizing rationale:** Why is the new size sufficient? (CPU/memory/IOPS argument)
-
-**Risk:** None / Low / Medium (explain if medium+)
-**Effort:** X hours  **Downtime:** None / X-minute window
-**How to validate:** one-liner test or metric to confirm the change is safe
 ---
 
-After per-resource blocks add:
+After all blocks:
 
-## SAVINGS SUMMARY TABLE
-| Resource | Current $/mo | Recommended | New $/mo | Monthly Saving | Effort |
-|----------|-------------|-------------|----------|----------------|--------|
-
-TOTAL POTENTIAL MONTHLY SAVINGS: $XX  (XX% reduction)
-TOTAL ANNUAL SAVINGS: $XX
-
-## QUICK-WIN LIST (zero/near-zero downtime, < 2 hours effort)
-- [ ] item — saving — effort
-
-## IMPLEMENTATION ROADMAP
-IMMEDIATE (this week):  items, combined saving $XX/mo
-NEXT SPRINT (2 weeks):  items, combined saving $XX/mo
-PLANNED (next month):   items, combined saving $XX/mo
-
-## COST EFFICIENCY GRADE
-Current: [A-F]   After optimizations: [A-F]
-Merge recommendation: MERGE — COST ACCEPTABLE / MERGE — NEEDS COST OPTIMISATION / BLOCK — EXCESSIVE COSTS
-
-Be precise with dollar amounts. Quote actual Terraform lines. Show exact replacements."""
+**Cost verdict:** `BLOCK — EXCESSIVE COSTS` / `NEEDS OPTIMISATION` / `ACCEPTABLE`
+Quick wins (zero downtime): list resource names + saving, one line each."""
 
 
 def build_executive_summary_prompt(security_analysis, cost_analysis):
-    """Create executive summary that synthesises both analyses into a merge decision."""
+    """Build a compact merge-decision header that stitches security + cost verdicts."""
 
-    return f"""You are a CTO / Lead Cloud Architect producing a PR merge-decision report.
+    return f"""You are a lead engineer writing the opening block of a GitHub PR comment.
 
-You have received a detailed security analysis and a detailed cost analysis, both referencing
-specific Terraform resources and lines.  Your job is to synthesise them into a concise,
-opinionated executive report that tells the team exactly what to do.
+You have a security review and a cost review (both already written below).
+Write ONLY the header summary block — the detailed sections already exist.
 
-══════════════════════════════════════════════════════
-SECURITY ANALYSIS (summary)
-══════════════════════════════════════════════════════
-{security_analysis[:4000]}
+SECURITY REVIEW:
+{security_analysis[:3000]}
 
-══════════════════════════════════════════════════════
-COST ANALYSIS (summary)
-══════════════════════════════════════════════════════
-{cost_analysis[:4000]}
+COST REVIEW:
+{cost_analysis[:3000]}
 
-══════════════════════════════════════════════════════
-REQUIRED OUTPUT — EXECUTIVE REPORT
-══════════════════════════════════════════════════════
+OUTPUT RULES:
+- Maximum 30 lines total.
+- No bullet-point essays. No roadmaps. No 30-day plans.
+- Tables only where specified below.
+- Extract the verdicts and numbers already present in the reviews above — do not invent new ones.
 
-## 🏥 INFRASTRUCTURE HEALTH SCORECARD
-| Dimension          | Grade | Top Issue                        |
-|--------------------|-------|----------------------------------|
-| Security           |  X/F  | (one-liner)                      |
-| Cost Efficiency    |  X/F  | (one-liner)                      |
-| Compliance         | 🔴/🟡/🟢 | (one-liner)                  |
-| **Overall**        |  X/F  |                                  |
+══════════════════════════════
+OUTPUT FORMAT (produce exactly this, filled in)
+══════════════════════════════
 
----
+## 🏗️ Infrastructure PR Analysis
 
-## ⚖️ PR MERGE DECISION
+| | Security | Cost |
+|-|----------|------|
+| **Status** | 🔴 BLOCK / 🟡 CHANGES / 🟢 OK | 🔴 BLOCK / 🟡 OPTIMISE / 🟢 OK |
+| **Top issue** | _one phrase_ | _one phrase_ |
+| **Findings** | X critical, Y high | $XX/mo · $XX/yr saving possible |
 
-**Decision:** ✅ APPROVE  /  ⚠️ APPROVE WITH CONDITIONS  /  ❌ REQUEST CHANGES
-*(pick exactly one and bold it)*
+**Merge decision: ❌ REQUEST CHANGES** _(or ✅ APPROVE / ⚠️ APPROVE WITH CONDITIONS)_
 
-**Rationale (2-3 sentences max):**
+**Must fix before merge:**
+- `resource.name` — one-line reason (from security review)
+- `resource.name` — one-line reason (if any)
 
----
-
-## 🚨 MUST-FIX BEFORE MERGE
-*(Only list true blockers — issues that could cause data breach, unauthorised access, or regulatory violation)*
-
-For each blocker:
-- **`resource_type.resource_name`** — `<file>:<line>`
-  - Risk: one sentence on what an attacker can do right now
-  - Fix: exact attribute change (quote before → after)
-  - Effort: X minutes
+**Can fix after merge:**
+- `resource.name` — saving $XX/mo or security note — effort X min
 
 ---
-
-## 💡 FIX AFTER MERGE (non-blocking improvements)
-
-### Security (fix within 1 week)
-- `resource` — issue — fix summary — X min effort
-
-### Cost savings (prioritised by $/month)
-| Resource | Change | Monthly Saving | Effort | Downtime |
-|----------|--------|----------------|--------|----------|
-
-**Total recoverable monthly cost: $XX  ($XX/year)**
-
----
-
-## 📅 30-DAY ROADMAP
-
-| Week | Action | Owner | Saving / Benefit |
-|------|--------|-------|-----------------|
-| Before merge | fix critical blockers | dev | unblock merge |
-| Week 1 | quick-win list | devops | $XX/mo |
-| Week 2-3 | right-sizing | devops | $XX/mo |
-| Week 4 | reserved instances / architectural | arch | $XX/mo |
-
----
-
-## ✅ FINAL VERDICT
-- Merge? **YES / NO / CONDITIONAL**
-- Conditions (if any): bullet list
-- Next 30-day focus: one sentence
-
-Keep it tight. Every bullet must reference a real resource from the analyses above."""
+_(Security details · Cost details below)_"""
 
 
 def ask_gemini(prompt, api_key, analysis_type="security"):
@@ -796,31 +695,25 @@ def save_report_to_file(security_analysis, cost_analysis, executive_summary, out
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Save as Markdown (for PR comments)
+    # ── Markdown (PR comment) ──────────────────────────────────────────────
+    # Structure: header summary → security findings → cost findings
     md_filename = f"{output_dir}/infrastructure-analysis-report.md"
-    md_content = f"""# Infrastructure Analysis Report
-
-**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-## Executive Summary
-
-{executive_summary}
+    md_content = f"""{executive_summary}
 
 ---
 
-## Security Analysis (Deep)
+## 🔒 Security Analysis
 
 {security_analysis}
 
 ---
 
-## Cost Analysis & Optimization (Deep)
+## 💰 Cost Analysis
 
 {cost_analysis}
 
 ---
-
-*Report generated by Infrastructure Analysis Tool (Checkov + Infracost + Gemini)*
+*Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · Checkov + Infracost + Gemini*
 """
 
     try:
@@ -830,43 +723,32 @@ def save_report_to_file(security_analysis, cost_analysis, executive_summary, out
     except Exception as e:
         print(f"\n⚠ Failed to save markdown report: {e}")
 
-    # Save as JSON (for artifacts)
+    # ── JSON (artifacts) ──────────────────────────────────────────────────
     json_filename = f"{output_dir}/infrastructure-analysis-report.json"
-    json_content = {
-        "timestamp": datetime.now().isoformat(),
-        "analyses": {
-            "executive_summary": executive_summary,
-            "security_analysis": security_analysis,
-            "cost_analysis": cost_analysis
-        }
-    }
-
     try:
         with open(json_filename, 'w', encoding='utf-8') as f:
-            json.dump(json_content, f, indent=2)
+            json.dump({
+                "timestamp": datetime.now().isoformat(),
+                "analyses": {
+                    "executive_summary": executive_summary,
+                    "security_analysis": security_analysis,
+                    "cost_analysis":     cost_analysis,
+                }
+            }, f, indent=2)
         print(f"✓ JSON report saved: {json_filename}")
     except Exception as e:
         print(f"⚠ Failed to save JSON report: {e}")
 
-    # Save summary as text (for email/notifications)
+    # ── Plain-text summary ────────────────────────────────────────────────
     txt_filename = f"{output_dir}/infrastructure-analysis-summary.txt"
-    txt_content = f"""INFRASTRUCTURE ANALYSIS SUMMARY
-Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-EXECUTIVE SUMMARY:
-{executive_summary[:500]}...
-
-For full details, see:
-- infrastructure-analysis-report.md (formatted report)
-- infrastructure-analysis-report.json (complete data)
-
----
-End of Summary
-"""
-
     try:
         with open(txt_filename, 'w', encoding='utf-8') as f:
-            f.write(txt_content)
+            f.write(
+                f"INFRASTRUCTURE ANALYSIS SUMMARY\n"
+                f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"{executive_summary[:800]}\n\n"
+                f"Full report: infrastructure-analysis-report.md\n"
+            )
         print(f"✓ Text summary saved: {txt_filename}")
     except Exception as e:
         print(f"⚠ Failed to save text summary: {e}")
