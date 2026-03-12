@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import subprocess
+import shutil
 from google import genai
 
 
@@ -14,18 +15,23 @@ MODEL = "models/gemini-2.5-flash"
 # UTIL
 # ==========================================================
 
+def tool_exists(name):
+    return shutil.which(name) is not None
+
+
 def run_cmd(cmd):
+
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
         print("Command failed:", " ".join(cmd))
         print(result.stderr)
-        sys.exit(1)
 
     return result.stdout
 
 
 def get_gemini_key():
+
     key = os.getenv("GEMINI_API_KEY")
 
     if not key:
@@ -41,10 +47,21 @@ def get_gemini_key():
 
 def generate_plan():
 
+    if not tool_exists("terraform"):
+        print("⚠ Terraform not found. Skipping Terraform plan.")
+        return "Terraform plan unavailable."
+
     print("Running Terraform init...")
-    run_cmd(["terraform", "init", "-input=false"])
+
+    run_cmd([
+        "terraform",
+        "init",
+        "-input=false",
+        "-backend=false"
+    ])
 
     print("Running Terraform plan...")
+
     run_cmd([
         "terraform",
         "plan",
@@ -53,6 +70,7 @@ def generate_plan():
     ])
 
     print("Generating plan text...")
+
     plan_text = run_cmd([
         "terraform",
         "show",
@@ -63,16 +81,20 @@ def generate_plan():
     with open("terraform-plan.txt", "w") as f:
         f.write(plan_text)
 
-    print("Generating JSON plan for Infracost...")
-    json_plan = run_cmd([
-        "terraform",
-        "show",
-        "-json",
-        "tfplan"
-    ])
+    try:
 
-    with open("plan.json", "w") as f:
-        f.write(json_plan)
+        json_plan = run_cmd([
+            "terraform",
+            "show",
+            "-json",
+            "tfplan"
+        ])
+
+        with open("plan.json", "w") as f:
+            f.write(json_plan)
+
+    except:
+        pass
 
     return plan_text[:8000]
 
@@ -82,6 +104,10 @@ def generate_plan():
 # ==========================================================
 
 def run_checkov():
+
+    if not tool_exists("checkov"):
+        print("⚠ Checkov not installed. Skipping security scan.")
+        return {}
 
     print("Running Checkov security scan...")
 
@@ -136,6 +162,14 @@ def parse_checkov(data):
 # ==========================================================
 
 def run_infracost():
+
+    if not tool_exists("infracost"):
+        print("⚠ Infracost not installed. Skipping cost analysis.")
+        return {}
+
+    if not os.path.exists("plan.json"):
+        print("⚠ Terraform plan.json not found. Skipping cost analysis.")
+        return {}
 
     print("Running Infracost cost analysis...")
 
@@ -204,16 +238,18 @@ def parse_cost(data):
 def build_prompt(plan, security, cost):
 
     return f"""
-You are a Principal Cloud Architect reviewing a Terraform pull request.
+You are a Principal Cloud Architect reviewing a Terraform infrastructure change.
 
-Inputs:
+Inputs provided:
 1. Terraform plan
-2. Checkov security findings
+2. Checkov security scan
 3. Infracost cost analysis
 
-Your task is to identify infrastructure issues.
+Your task:
 
-For each issue provide:
+Identify issues and provide actionable recommendations.
+
+For each issue include:
 
 Finding
 Risk
@@ -223,7 +259,7 @@ Recommendation
 Steps to Fix
 Terraform Fix Example
 
-Organize the output into the following sections:
+Organize the output under these sections:
 
 Infrastructure Changes
 Security Issues
@@ -232,12 +268,10 @@ Reliability Concerns
 Architecture Anti-Patterns
 
 Rules:
-
 - Only analyze the provided inputs
 - Do not invent resources
-- Focus on real actionable issues
+- Be concise and actionable
 - If cost increase is detected explain the reason
-- Provide Terraform fix examples where possible
 
 Terraform Plan:
 {plan}
@@ -245,7 +279,7 @@ Terraform Plan:
 Checkov Findings:
 {security}
 
-Cost Report:
+Cost Breakdown:
 {cost}
 """
 
