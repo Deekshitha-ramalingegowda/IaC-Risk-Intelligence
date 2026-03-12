@@ -6,7 +6,7 @@ provider "aws" {
 # SECURITY ISSUES - INTENTIONAL MISCONFIGS
 # ============================================
 
-resource "aws_security_group "bad_sg" {
+resource "aws_security_group" "bad_sg" {
   name = "bad-sg"
 
   ingress {
