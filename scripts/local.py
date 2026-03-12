@@ -65,6 +65,43 @@ def get_file_info(filename):
         return 0, 0
 
 
+def load_terraform_sources(terraform_dir="terraform"):
+    """
+    Load all .tf files from the terraform directory and return them as a
+    single annotated string:  «── path/to/file.tf ──»  followed by the
+    numbered source lines.  Falls back to the current directory when the
+    terraform/ folder is absent (CI runs checkov from repo root).
+    """
+    search_dirs = [terraform_dir, "."]
+    tf_files: dict[str, str] = {}
+
+    for search_dir in search_dirs:
+        base = Path(search_dir)
+        if base.is_dir():
+            for tf_path in sorted(base.rglob("*.tf")):
+                rel = str(tf_path)
+                if rel not in tf_files:
+                    try:
+                        text = tf_path.read_text(encoding="utf-8", errors="replace")
+                        tf_files[rel] = text
+                    except Exception:
+                        pass
+        if tf_files:
+            break          # stop once we found at least one .tf file
+
+    if not tf_files:
+        return ""
+
+    parts = []
+    for path, content in tf_files.items():
+        numbered = "\n".join(
+            f"{i+1:4d}  {line}" for i, line in enumerate(content.splitlines())
+        )
+        parts.append(f"\n\n«── {path} ──»\n{numbered}")
+
+    return "\n".join(parts)
+
+
 
 def get_gemini_key():
     key = os.getenv("GEMINI_API_KEY")
@@ -330,352 +367,330 @@ Be specific with amounts and actionable recommendations."""
 # ============================================================================
 
 def build_security_deep_prompt(checkov_data):
-    """Create deep security analysis prompt with OPTIMIZED Checkov data (token-efficient)"""
+    """Create deep security analysis prompt that references actual Terraform source lines."""
 
-    # Extract only FAILED checks - ignore passed checks to save tokens
     failed_checks = checkov_data.get("results", {}).get("failed_checks", [])
 
-    # Group by resource for easier analysis
-    checks_by_resource = {}
+    # ── Build a structured finding list with file + line range ──────────────
+    checks_by_resource: dict = {}
     for check in failed_checks:
-        resource = check.get("resource", "unknown")
-        check_id = check.get("check_id", "unknown")
-        check_name = check.get("check_name", "")
+        resource  = check.get("resource", "unknown")
+        file_path = check.get("file_path", "")
+        # Checkov reports line numbers under file_line_range or code_block
+        line_range = check.get("file_line_range", [])
+        code_block = check.get("code_block", [])  # list of [line_no, code_text]
 
         if resource not in checks_by_resource:
-            checks_by_resource[resource] = []
-        checks_by_resource[resource].append({
-            "id": check_id,
-            "name": check_name,
-            "file": check.get("file_path", ""),
-            "file_abs_path": check.get("file_abs_path", "")
+            checks_by_resource[resource] = {
+                "file": file_path,
+                "line_range": line_range,
+                "checks": [],
+                "code_snippet": code_block,
+            }
+        checks_by_resource[resource]["checks"].append({
+            "id":   check.get("check_id", ""),
+            "name": check.get("check_name", ""),
         })
 
-    # Build concise summary (NOT full JSON - saves 80% tokens!)
-    summary = f"""CHECKOV SECURITY ANALYSIS SUMMARY
-Total failed checks: {len(failed_checks)}
+    # ── Build findings text ──────────────────────────────────────────────────
+    findings_lines = [f"Total failed checks: {len(failed_checks)}\n"]
+    for resource, info in sorted(checks_by_resource.items())[:25]:
+        loc = f"{info['file']}" + (f" lines {info['line_range']}" if info["line_range"] else "")
+        findings_lines.append(f"\nRESOURCE: {resource}  ({loc})")
+        for c in info["checks"][:6]:
+            findings_lines.append(f"  [{c['id']}] {c['name']}")
+        if info["code_snippet"]:
+            snippet = "\n".join(f"    {ln}: {code}" for ln, code in info["code_snippet"][:15])
+            findings_lines.append(f"  Current code:\n{snippet}")
 
-FAILED CHECKS BY RESOURCE:
+    findings_text = "\n".join(findings_lines)
+
+    # ── Load actual .tf source for reference ────────────────────────────────
+    tf_sources = load_terraform_sources()
+    tf_section = ""
+    if tf_sources:
+        tf_section = f"""
+FULL TERRAFORM SOURCE (use line numbers to pinpoint issues):
+{tf_sources[:12000]}
 """
 
-    for resource, checks in sorted(checks_by_resource.items())[:20]:  # Top 20 resources
-        summary += f"\n{resource}:\n"
-        for check in checks[:5]:  # Top 5 checks per resource
-            summary += f"  - {check['id']}: {check['name']}\n"
+    return f"""You are a senior security architect performing a deep code review of Terraform infrastructure.
 
-    return f"""You are a security architect analyzing Terraform infrastructure security posture.
+You have BOTH the Checkov findings (with file/line references) AND the actual Terraform source code below.
+Your job is to produce a precise, developer-ready security report — not generic advice.
 
-ANALYZE THIS SECURITY SUMMARY - PROVIDE DETAILED, ACTIONABLE ANALYSIS:
+══════════════════════════════════════════════════════
+CHECKOV FINDINGS
+══════════════════════════════════════════════════════
+{findings_text}
+{tf_section}
+══════════════════════════════════════════════════════
+REQUIRED OUTPUT FORMAT
+══════════════════════════════════════════════════════
 
-{summary}
+For EVERY failed resource above, produce one block in this exact format:
 
-Your analysis MUST include specific details for each CRITICAL finding:
+---
+### [CHECK_ID] · SEVERITY · resource_type.resource_name
 
-1. CRITICAL SECURITY THREATS (detailed):
-   For each CRITICAL finding, provide:
-   - Resource affected: [specific resource name]
-   - Security threat: [specific attack vector and vulnerability]
-   - Data/Access at risk: [what data or services are exposed]
-   - Likelihood of exploitation: HIGH/MEDIUM/LOW
-   - Potential impact: [data breach, unauthorized access, etc.]
-   - Compliance violations: [HIPAA, PCI-DSS, SOC2, CIS Benchmarks if applicable]
+**File & line:** `<file_path>:<line_start>-<line_end>`
 
-   MITIGATION STEPS (be specific):
-   1. Exact Terraform code change needed
-   2. Effort estimate: X hours
-   3. Downtime/Performance impact
-   4. Testing/Validation method
-   5. Rollback plan
+**What the current code does wrong:**
+Quote the 1-3 offending lines from the source above and explain the exact risk
+(attack vector, what is exposed, blast radius).
 
-2. RISK SCORECARD (per resource):
-   Format: [resource_name]: [score]/100 ([SEVERITY])
-   - Include top 10 highest-risk resources
+**Terraform fix — replace this:**
+```hcl
+# paste the CURRENT bad block/attribute (from source)
+```
+**with this:**
+```hcl
+# paste the CORRECTED block/attribute with only the minimum change required
+```
 
-3. ATTACK SCENARIO ANALYSIS:
-   - Most likely attack path
-   - Step-by-step exploitation
-   - Timeline to exploitation if not fixed
+**Why this fix works:** One sentence.
 
-4. REMEDIATION ROADMAP:
-   IMMEDIATE (within 24 hours):
-   - [Critical fix with 1-sentence impact]
+**Effort:** X minutes · **Downtime:** None / Minimal / Rolling restart required
+**Compliance impact:** list any CIS / PCI-DSS / SOC2 controls satisfied by this fix
+---
 
-   SHORT-TERM (1 week):
-   - [High-priority fix]
+After all per-finding blocks, add:
 
-5. INFRASTRUCTURE SECURITY GRADE:
-   Current Grade: [A-F]
-   Target Grade: A+
-   Recommendation: [APPROVE/NEEDS FIXES/BLOCK]
+## RISK SCORECARD
+| Resource | Top Check | Severity | Score /100 |
+|----------|-----------|----------|------------|
+(top 10 highest-risk resources)
 
-Reference all Checkov check IDs. Be VERY SPECIFIC with actual fixes needed."""
+## REMEDIATION ROADMAP
+IMMEDIATE (fix before merge):
+- [ ] item — 1-sentence impact — X min effort
+
+SHORT-TERM (fix within 1 week):
+- [ ] item
+
+## INFRASTRUCTURE SECURITY GRADE
+Current: [A-F]   Target: A+
+Merge recommendation: APPROVE / REQUEST CHANGES / BLOCK
+
+Be surgical. Quote actual lines. Show exact diffs. No padding."""
 
 
 def build_cost_deep_prompt(infracost_data):
-    """Create deep cost analysis prompt with OPTIMIZED Infracost data (token-efficient)"""
+    """Create deep cost analysis prompt that cross-references Terraform source."""
 
-    # Extract key cost data without full JSON dump
-    total_cost = float(infracost_data.get('totalMonthlyCost', 0))
+    total_cost = float(infracost_data.get('totalMonthlyCost', 0) or 0)
 
-    # Extract resources with their costs
+    # ── Extract per-resource cost data ──────────────────────────────────────
     resource_costs = []
-    projects = infracost_data.get("projects", [])
-
-    for project in projects:
-        breakdown = project.get("breakdown", {})
-        resources = breakdown.get("resources", [])
-
-        for resource in resources:
-            name = resource.get("name", "unknown")
+    for project in infracost_data.get("projects", []):
+        for resource in project.get("breakdown", {}).get("resources", []):
+            name          = resource.get("name", "unknown")
             resource_type = resource.get("resourceType", "unknown")
+            monthly_cost  = 0.0
+            components    = []
 
-            monthly_cost = 0
-            cost_components = []
-
-            # Sum all cost components for this resource
-            costs = resource.get("costComponents", [])
-            for cost in costs:
-                if "monthlyCost" in cost and cost["monthlyCost"]:
-                    try:
-                        monthly_cost += float(cost["monthlyCost"])
-                        cost_components.append({
-                            "description": cost.get("description", ""),
-                            "price": float(cost.get("monthlyCost", 0))
+            for cost in resource.get("costComponents", []):
+                try:
+                    c = float(cost.get("monthlyCost") or 0)
+                    monthly_cost += c
+                    if c > 0:
+                        components.append({
+                            "desc":  cost.get("description", ""),
+                            "unit":  cost.get("unit", ""),
+                            "qty":   cost.get("monthlyQuantity", ""),
+                            "price": c,
                         })
+                except (ValueError, TypeError):
+                    pass
+
+            for sub in resource.get("subresources", []):
+                for cost in sub.get("costComponents", []):
+                    try:
+                        monthly_cost += float(cost.get("monthlyCost") or 0)
                     except (ValueError, TypeError):
                         pass
 
-            # Include subresources
-            subresources = resource.get("subresources", [])
-            for subresouce in subresources:
-                subcosts = subresouce.get("costComponents", [])
-                for cost in subcosts:
-                    if "monthlyCost" in cost and cost["monthlyCost"]:
-                        try:
-                            monthly_cost += float(cost.get("monthlyCost", 0))
-                        except (ValueError, TypeError):
-                            pass
-
             if monthly_cost > 0:
                 resource_costs.append({
-                    "name": name,
-                    "type": resource_type,
-                    "cost": monthly_cost,
-                    "components": cost_components[:3]  # Top 3 cost components per resource
+                    "name":       name,
+                    "type":       resource_type,
+                    "cost":       monthly_cost,
+                    "components": components[:4],
                 })
 
-    # Sort by cost descending
     resource_costs.sort(key=lambda x: x["cost"], reverse=True)
 
-    # Build summary with only TOP resources
-    summary = f"""INFRACOST COST ANALYSIS SUMMARY
-Total Monthly Cost: ${total_cost:.2f}
-Total Annual Cost: ${total_cost*12:.2f}
+    # ── Build cost summary text ──────────────────────────────────────────────
+    cost_lines = [
+        f"TOTAL MONTHLY COST : ${total_cost:.2f}",
+        f"TOTAL ANNUAL COST  : ${total_cost * 12:.2f}\n",
+        "TOP 10 RESOURCES BY COST:",
+    ]
+    for i, res in enumerate(resource_costs[:10], 1):
+        cost_lines.append(f"\n{i}. {res['name']}  ({res['type']})  →  ${res['cost']:.2f}/month")
+        for comp in res["components"]:
+            cost_lines.append(
+                f"   • {comp['desc']}: {comp['qty']} × {comp['unit']} = ${comp['price']:.2f}"
+            )
 
-TOP 10 RESOURCES BY COST:
+    cost_summary = "\n".join(cost_lines)
+
+    # ── Load Terraform source for context ────────────────────────────────────
+    tf_sources = load_terraform_sources()
+    tf_section = ""
+    if tf_sources:
+        tf_section = f"""
+FULL TERRAFORM SOURCE (use resource names to find exact blocks):
+{tf_sources[:10000]}
 """
 
-    for i, res in enumerate(resource_costs[:10], 1):
-        summary += f"\n{i}. {res['name']} ({res['type']}): ${res['cost']:.2f}/month\n"
-        if res['components']:
-            for comp in res['components']:
-                if comp['description'] and comp['price'] > 0:
-                    summary += f"   - {comp['description']}: ${comp['price']:.2f}\n"
+    return f"""You are a cloud cost-optimization engineer reviewing AWS Terraform infrastructure.
 
-    # Add cost breakdown by category
-    summary += f"\n\nCOST SUMMARY BY CATEGORY:"
-    cost_by_type = {}
-    for res in resource_costs:
-        res_type = res['type'].split('.')[-1] if '.' in res['type'] else res['type']
-        if res_type not in cost_by_type:
-            cost_by_type[res_type] = 0
-        cost_by_type[res_type] += res['cost']
+You have BOTH the Infracost breakdown AND the actual Terraform source.
+Produce a developer-ready cost optimisation report — quote exact resource blocks, show the replacement.
 
-    for res_type in sorted(cost_by_type.keys(), key=lambda x: cost_by_type[x], reverse=True)[:10]:
-        summary += f"\n{res_type}: ${cost_by_type[res_type]:.2f}/month"
+══════════════════════════════════════════════════════
+INFRACOST BREAKDOWN
+══════════════════════════════════════════════════════
+{cost_summary}
+{tf_section}
+══════════════════════════════════════════════════════
+REQUIRED OUTPUT FORMAT
+══════════════════════════════════════════════════════
 
-    return f"""You are a cloud cost optimization expert analyzing AWS infrastructure costs.
+For each resource costing more than $50/month, produce one block:
 
-ANALYZE THIS COST SUMMARY - PROVIDE DETAILED COST OPTIMIZATION STRATEGY:
+---
+### resource_type.resource_name — ${'{cost}'}/month
 
-{summary}
+**Current Terraform config (quote the relevant block from source):**
+```hcl
+# paste the current resource block or the key attributes
+```
 
-Your analysis MUST include specific technical and financial details:
+**Problem:** One sentence on why this is over-provisioned or wasteful.
 
-1. RESOURCE-BY-RESOURCE OPTIMIZATION (focus on top 5 most expensive resources):
+**Recommended change:**
+```hcl
+# paste only the changed lines (keep everything else identical)
+```
 
-   For each expensive resource (>$100/month):
+**Estimated new cost:** $XX/month  →  saving **$XX/month ($XX/year)**
 
-   Current Configuration:
-   - Resource name: [actual resource name]
-   - Type: [instance/volume type]
-   - Current monthly cost: $XXX
-   - Annual cost: $XXX
+**Sizing rationale:** Why is the new size sufficient? (CPU/memory/IOPS argument)
 
-   ALTERNATIVE OPTIONS (evaluate 2-3 similar types):
-   Option 1: [Downsized alternative type]
-   - Monthly cost: $XXX (savings: $XXX, or X% reduction)
-   - Feasibility: [LOW/MEDIUM/HIGH]
-   - Implementation effort: X hours
-   - Downtime risk: [None/Minimal/Significant]
-   - Performance impact: [None/Minimal/Significant]
-   - Testing needed: [what to validate]
-   - Recommendation: [RECOMMENDED/CONSIDER/NOT RECOMMENDED]
+**Risk:** None / Low / Medium (explain if medium+)
+**Effort:** X hours  **Downtime:** None / X-minute window
+**How to validate:** one-liner test or metric to confirm the change is safe
+---
 
-   BEST CHOICE: [Which option with justification]
+After per-resource blocks add:
 
-2. COST BREAKDOWN & COMPARISON TABLE:
-   Resource | Current Type | Monthly Cost | Recommended | Monthly Savings | Effort
-   ---------|--------------|-------------|-------------|-----------------|-------
-   [List top 5 most expensive resources with recommendations]
+## SAVINGS SUMMARY TABLE
+| Resource | Current $/mo | Recommended | New $/mo | Monthly Saving | Effort |
+|----------|-------------|-------------|----------|----------------|--------|
 
-   TOTAL MONTHLY SAVINGS POTENTIAL: $XXX
-   TOTAL ANNUAL SAVINGS: $XXX
+TOTAL POTENTIAL MONTHLY SAVINGS: $XX  (XX% reduction)
+TOTAL ANNUAL SAVINGS: $XX
 
-3. SAVINGS OPPORTUNITIES BY PRIORITY:
+## QUICK-WIN LIST (zero/near-zero downtime, < 2 hours effort)
+- [ ] item — saving — effort
 
-   Compute Optimization:
-   - [Specific instance downsizing suggestions] = $XXX/month
-   - [Unused or oversized resources] = $XXX/month
+## IMPLEMENTATION ROADMAP
+IMMEDIATE (this week):  items, combined saving $XX/mo
+NEXT SPRINT (2 weeks):  items, combined saving $XX/mo
+PLANNED (next month):   items, combined saving $XX/mo
 
-   Storage Optimization:
-   - [EBS volume adjustments] = $XXX/month
-   - [Unused volumes to delete] = $XXX/month
+## COST EFFICIENCY GRADE
+Current: [A-F]   After optimizations: [A-F]
+Merge recommendation: MERGE — COST ACCEPTABLE / MERGE — NEEDS COST OPTIMISATION / BLOCK — EXCESSIVE COSTS
 
-   Network Optimization:
-   - [NAT Gateway or data transfer reduction] = $XXX/month
-
-4. IMPLEMENTATION ROADMAP:
-
-   IMMEDIATE (within days - quick wins):
-   - [Delete unused resources]
-   - Savings: $XX/month
-   - Downtime: None
-   - Effort: 1-2 hours
-
-   SHORT-TERM (1-2 weeks - requires testing):
-   - [Instance downsizing or type changes]
-   - Savings: $XXX/month
-   - Downtime: [Specify if any]
-   - Effort: X hours (including testing)
-
-5. COST EFFICIENCY METRICS:
-
-   Current state: ${total_cost:.2f}/month (${total_cost*12:.2f}/year)
-   With optimizations: $XXX/month ($XXX/year)
-
-   Total savings potential: X% reduction
-   Cost Efficiency Grade: [A-F]
-
-   Break-even timeline: X weeks for any migration efforts
-
-PROVIDE SPECIFIC INSTANCE TYPES, EXACT NUMBERS, and feasibility analysis.
-Recommendation: [MERGE - COST ACCEPTABLE / MERGE - NEEDS COST OPTIMIZATION / BLOCK - EXCESSIVE COSTS]"""
+Be precise with dollar amounts. Quote actual Terraform lines. Show exact replacements."""
 
 
 def build_executive_summary_prompt(security_analysis, cost_analysis):
-    """Create comprehensive executive summary combining both analyses"""
+    """Create executive summary that synthesises both analyses into a merge decision."""
 
-    return f"""You are a CTO/Cloud Architect reviewing infrastructure audit findings for a PR merge decision.
+    return f"""You are a CTO / Lead Cloud Architect producing a PR merge-decision report.
 
-SYNTHESIZE THESE TWO ANALYSES INTO A STRATEGIC EXECUTIVE SUMMARY:
+You have received a detailed security analysis and a detailed cost analysis, both referencing
+specific Terraform resources and lines.  Your job is to synthesise them into a concise,
+opinionated executive report that tells the team exactly what to do.
 
-SECURITY ANALYSIS FINDINGS:
-{security_analysis}
+══════════════════════════════════════════════════════
+SECURITY ANALYSIS (summary)
+══════════════════════════════════════════════════════
+{security_analysis[:4000]}
+
+══════════════════════════════════════════════════════
+COST ANALYSIS (summary)
+══════════════════════════════════════════════════════
+{cost_analysis[:4000]}
+
+══════════════════════════════════════════════════════
+REQUIRED OUTPUT — EXECUTIVE REPORT
+══════════════════════════════════════════════════════
+
+## 🏥 INFRASTRUCTURE HEALTH SCORECARD
+| Dimension          | Grade | Top Issue                        |
+|--------------------|-------|----------------------------------|
+| Security           |  X/F  | (one-liner)                      |
+| Cost Efficiency    |  X/F  | (one-liner)                      |
+| Compliance         | 🔴/🟡/🟢 | (one-liner)                  |
+| **Overall**        |  X/F  |                                  |
 
 ---
 
-COST ANALYSIS FINDINGS:
-{cost_analysis}
+## ⚖️ PR MERGE DECISION
+
+**Decision:** ✅ APPROVE  /  ⚠️ APPROVE WITH CONDITIONS  /  ❌ REQUEST CHANGES
+*(pick exactly one and bold it)*
+
+**Rationale (2-3 sentences max):**
 
 ---
 
-CREATE AN EXECUTIVE REPORT FOR PR MERGE DECISION with:
+## 🚨 MUST-FIX BEFORE MERGE
+*(Only list true blockers — issues that could cause data breach, unauthorised access, or regulatory violation)*
 
-1. INFRASTRUCTURE HEALTH SCORECARD:
-   Overall Grade: [A-F with clear reasoning]
-   - What's the most critical issue preventing an A grade?
+For each blocker:
+- **`resource_type.resource_name`** — `<file>:<line>`
+  - Risk: one sentence on what an attacker can do right now
+  - Fix: exact attribute change (quote before → after)
+  - Effort: X minutes
 
-   Security Grade: [A-F]
-   - List top 3 security issues preventing higher grade
+---
 
-   Cost Efficiency Grade: [A-F]
-   - Is the infrastructure cost appropriate for what it does?
+## 💡 FIX AFTER MERGE (non-blocking improvements)
 
-   Compliance Status: [GREEN/YELLOW/RED]
-   - Any compliance violations?
+### Security (fix within 1 week)
+- `resource` — issue — fix summary — X min effort
 
-2. PR MERGE DECISION RECOMMENDATION:
-   ✓ APPROVE - Infrastructure is secure and cost-appropriate
-   ⚠ APPROVE WITH CONDITIONS - Fix these 2-3 items before/after merge:
-      1. [Issue with timeline]
-      2. [Issue with timeline]
-   ✗ REQUEST CHANGES - Block merge until these critical items are fixed:
-      1. [Critical issue with why it blocks]
-      2. [Critical issue]
+### Cost savings (prioritised by $/month)
+| Resource | Change | Monthly Saving | Effort | Downtime |
+|----------|--------|----------------|--------|----------|
 
-3. KEY METRICS & BUSINESS IMPACT:
-   Security Risks:
-   - Critical issues: [N] (what they are)
-   - High issues: [N] (what they are)
-   - Total effort to remediate: [X] hours
-   - Timeline: Can be fixed in [X] weeks
+**Total recoverable monthly cost: $XX  ($XX/year)**
 
-   Cost Analysis:
-   - Monthly cost: $XXX (is this high/appropriate?)
-   - Savings potential: $XXX/month ([X]% reduction)
-   - Payback period: [X] weeks to break even on optimization effort
-   - Annual impact: $XXX/year in savings if optimized
+---
 
-4. CRITICAL ITEMS FOR PR MERGE (if any):
-   [For each critical blocker, state exactly why it prevents merge]
+## 📅 30-DAY ROADMAP
 
-   Example:
-   - Open SSH access (port 22 to 0.0.0.0/0): ANY IP can gain shell access
-     Status: CRITICAL BLOCKER - Must be fixed before merge
-     Fix effort: 10 minutes (add restrict_security_group_rule)
-     Recommended action: Request changes, fix, then approve
+| Week | Action | Owner | Saving / Benefit |
+|------|--------|-------|-----------------|
+| Before merge | fix critical blockers | dev | unblock merge |
+| Week 1 | quick-win list | devops | $XX/mo |
+| Week 2-3 | right-sizing | devops | $XX/mo |
+| Week 4 | reserved instances / architectural | arch | $XX/mo |
 
-   - Database with no encryption: Customer data vulnerable to eavesdropping
-     Status: CRITICAL BLOCKER - Must be fixed before merge
-     Fix effort: 2-3 hours (create encrypted snapshot, restore)
+---
 
-5. ITEMS THAT CAN BE FIXED POST-MERGE (optional):
-   [Non-blocking improvements]
+## ✅ FINAL VERDICT
+- Merge? **YES / NO / CONDITIONAL**
+- Conditions (if any): bullet list
+- Next 30-day focus: one sentence
 
-   Example:
-   - RDS downsizing from db.r5.2xlarge to db.r5.xlarge
-     Savings: $525.80/month
-     Effort: 8 hours (testing required)
-     Timeline: Can be done in Week 2
-     Risk: 15-30 min downtime for RDS failover
-     Recommendation: Fix after merge during maintenance window
-
-6. 30-DAY IMPLEMENTATION ROADMAP:
-
-   BEFORE MERGE (Address critical blockers):
-   [List items that must be done before merge]
-
-   WEEK 1 AFTER MERGE (Quick wins):
-   - [Delete unused EBS volumes: saves $XX/month, 1 hour effort]
-   - [Fix open SSH access: 10 minutes, zero downtime]
-
-   WEEK 2-3 (Cost optimization):
-   - [RDS downsizing: saves $XXX/month, 8 hours effort, 15-30 min downtime]
-
-   WEEK 4 (Architectural improvements):
-   - [Consider Reserved Instances if workload is stable]
-
-7. PR MERGE DECISION SUMMARY:
-   Should this PR be merged? YES / NO / CONDITIONAL
-
-   If CONDITIONAL, list the specific conditions and timeline.
-
-   If NO, explain which critical issues must be fixed first.
-
-   If YES, what should the team focus on in the next 30 days?
-
-Format as a clear, concise executive report suitable for engineering leadership/team leads to make a merge decision."""
+Keep it tight. Every bullet must reference a real resource from the analyses above."""
 
 
 def ask_gemini(prompt, api_key, analysis_type="security"):
