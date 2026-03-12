@@ -6,8 +6,8 @@ provider "aws" {
 # SECURITY ISSUES - INTENTIONAL MISCONFIGS
 # ============================================
 
-resource "aws_security_group" "bad_sg" {
-  name = "bad-sg"
+resource "aws_security_group"  "bad_sg" {
+   name =   "bad-sg"
 
   ingress {
     from_port   = 22
@@ -307,11 +307,4 @@ resource "aws_instance" "optimized_instance" {
 
 # Data source for current AWS account
 data "aws_caller_identity" "current" {}
-
-
-
-
-
-
-
 

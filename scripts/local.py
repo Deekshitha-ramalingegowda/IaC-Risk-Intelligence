@@ -4,40 +4,86 @@ import os
 import sys
 import json
 import subprocess
-from pathlib import Path
-
 from google import genai
 
 
 MODEL = "models/gemini-2.5-flash"
 
 
-# ===============================
-# UTILITIES
-# ===============================
-
-def get_gemini_key():
-    key = os.getenv("GEMINI_API_KEY")
-    if not key:
-        print("GEMINI_API_KEY not set")
-        sys.exit(1)
-    return key
-
+# ==========================================================
+# UTIL
+# ==========================================================
 
 def run_cmd(cmd):
     result = subprocess.run(cmd, capture_output=True, text=True)
+
     if result.returncode != 0:
+        print("Command failed:", " ".join(cmd))
         print(result.stderr)
+        sys.exit(1)
+
     return result.stdout
 
 
-# ===============================
-# RUN SECURITY SCAN
-# ===============================
+def get_gemini_key():
+    key = os.getenv("GEMINI_API_KEY")
+
+    if not key:
+        print("ERROR: GEMINI_API_KEY not set")
+        sys.exit(1)
+
+    return key
+
+
+# ==========================================================
+# TERRAFORM PLAN
+# ==========================================================
+
+def generate_plan():
+
+    print("Running Terraform init...")
+    run_cmd(["terraform", "init", "-input=false"])
+
+    print("Running Terraform plan...")
+    run_cmd([
+        "terraform",
+        "plan",
+        "-no-color",
+        "-out=tfplan"
+    ])
+
+    print("Generating plan text...")
+    plan_text = run_cmd([
+        "terraform",
+        "show",
+        "-no-color",
+        "tfplan"
+    ])
+
+    with open("terraform-plan.txt", "w") as f:
+        f.write(plan_text)
+
+    print("Generating JSON plan for Infracost...")
+    json_plan = run_cmd([
+        "terraform",
+        "show",
+        "-json",
+        "tfplan"
+    ])
+
+    with open("plan.json", "w") as f:
+        f.write(json_plan)
+
+    return plan_text[:8000]
+
+
+# ==========================================================
+# CHECKOV
+# ==========================================================
 
 def run_checkov():
 
-    print("Running Checkov...")
+    print("Running Checkov security scan...")
 
     cmd = [
         "checkov",
@@ -51,56 +97,26 @@ def run_checkov():
     with open("checkov-output.json", "w") as f:
         f.write(output)
 
-    return json.loads(output)
+    try:
+        return json.loads(output)
+    except:
+        return {}
 
-
-# ===============================
-# RUN COST SCAN
-# ===============================
-
-def run_infracost():
-
-    print("Running Infracost...")
-
-    cmd = [
-        "infracost",
-        "breakdown",
-        "--path", ".",
-        "--format", "json"
-    ]
-
-    output = run_cmd(cmd)
-
-    with open("infracost-output.json", "w") as f:
-        f.write(output)
-
-    return json.loads(output)
-
-
-# ===============================
-# TERRAFORM PLAN
-# ===============================
-
-def load_terraform_plan():
-
-    plan_file = "terraform-plan.txt"
-
-    if not os.path.exists(plan_file):
-        return "Terraform plan not provided."
-
-    with open(plan_file, "r", encoding="utf8", errors="ignore") as f:
-        return f.read()[:12000]
-
-
-# ===============================
-# PARSE CHECKOV
-# ===============================
 
 def parse_checkov(data):
 
-    failed = data.get("results", {}).get("failed_checks", [])
+    failed = []
 
-    lines = []
+    if isinstance(data, list):
+        for entry in data:
+            failed.extend(entry.get("results", {}).get("failed_checks", []))
+    else:
+        failed = data.get("results", {}).get("failed_checks", [])
+
+    if not failed:
+        return "No security issues detected."
+
+    findings = []
 
     for c in failed[:100]:
 
@@ -108,19 +124,45 @@ def parse_checkov(data):
         resource = c.get("resource")
         name = c.get("check_name")
 
-        lines.append(f"{cid} | {resource} | {name}")
+        findings.append(
+            f"{cid} | {resource} | {name}"
+        )
 
-    return "\n".join(lines)
+    return "\n".join(findings)
 
 
-# ===============================
-# PARSE COST
-# ===============================
+# ==========================================================
+# INFRACOST
+# ==========================================================
+
+def run_infracost():
+
+    print("Running Infracost cost analysis...")
+
+    cmd = [
+        "infracost",
+        "breakdown",
+        "--path",
+        "plan.json",
+        "--format",
+        "json"
+    ]
+
+    output = run_cmd(cmd)
+
+    with open("infracost-output.json", "w") as f:
+        f.write(output)
+
+    try:
+        return json.loads(output)
+    except:
+        return {}
+
 
 def parse_cost(data):
 
     if not data:
-        return "No cost data"
+        return "No cost data available."
 
     resources = []
 
@@ -133,36 +175,43 @@ def parse_cost(data):
 
             monthly = 0
 
-            for c in r.get("costComponents", []):
+            for comp in r.get("costComponents", []):
+
+                value = comp.get("monthlyCost")
 
                 try:
-                    monthly += float(c.get("monthlyCost", 0))
+                    if value:
+                        monthly += float(value)
                 except:
                     pass
 
             if monthly > 0:
+
                 resources.append(
                     f"{name} ({rtype}) : ${monthly:.2f}/month"
                 )
 
+    if not resources:
+        return "No billable resources detected."
+
     return "\n".join(resources[:50])
 
 
-# ===============================
-# BUILD PROMPT
-# ===============================
+# ==========================================================
+# PROMPT
+# ==========================================================
 
 def build_prompt(plan, security, cost):
 
     return f"""
-You are a senior cloud architect reviewing a Terraform pull request.
+You are a Principal Cloud Architect reviewing a Terraform pull request.
 
 Inputs:
 1. Terraform plan
-2. Checkov security scan results
-3. Infracost cost difference report
+2. Checkov security findings
+3. Infracost cost analysis
 
-Your job is to analyze the infrastructure changes.
+Your task is to identify infrastructure issues.
 
 For each issue provide:
 
@@ -170,11 +219,11 @@ Finding
 Risk
 Cost Impact
 Root Cause
-Solution
+Recommendation
 Steps to Fix
 Terraform Fix Example
 
-Organize output under these sections:
+Organize the output into the following sections:
 
 Infrastructure Changes
 Security Issues
@@ -182,54 +231,28 @@ Cost Impact
 Reliability Concerns
 Architecture Anti-Patterns
 
-Example:
+Rules:
 
-Security Issues
-
-Finding:
-Security group allows SSH from 0.0.0.0/0
-
-Risk:
-Anyone can attempt brute force login.
-
-Cost Impact:
-None
-
-Root Cause:
-Security group allows unrestricted inbound rule.
-
-Solution:
-Restrict SSH access to trusted CIDR.
-
-Steps to Fix:
-1. Identify trusted IP range
-2. Update SG rule
-3. Apply terraform
-
-Terraform Fix Example:
-
-resource "aws_security_group_rule" "ssh" {{
- type = "ingress"
- from_port = 22
- to_port = 22
- protocol = "tcp"
- cidr_blocks = ["10.0.0.0/24"]
-}}
+- Only analyze the provided inputs
+- Do not invent resources
+- Focus on real actionable issues
+- If cost increase is detected explain the reason
+- Provide Terraform fix examples where possible
 
 Terraform Plan:
 {plan}
 
-Checkov Results:
+Checkov Findings:
 {security}
 
-Infracost Diff:
+Cost Report:
 {cost}
 """
 
 
-# ===============================
-# GEMINI CALL
-# ===============================
+# ==========================================================
+# GEMINI
+# ==========================================================
 
 def ask_gemini(prompt, api_key):
 
@@ -244,40 +267,48 @@ def ask_gemini(prompt, api_key):
         }
     )
 
-    return response.text
+    if response and response.text:
+        return response.text
+
+    return "AI returned empty response."
 
 
-# ===============================
+# ==========================================================
 # MAIN
-# ===============================
+# ==========================================================
 
 def main():
 
+    print("\nStarting AI Infrastructure Analysis\n")
+
     key = get_gemini_key()
 
-    print("Running infrastructure analysis...")
+    plan = generate_plan()
 
     checkov_data = run_checkov()
     infracost_data = run_infracost()
-
-    plan = load_terraform_plan()
 
     security = parse_checkov(checkov_data)
     cost = parse_cost(infracost_data)
 
     prompt = build_prompt(plan, security, cost)
 
-    print("Running AI analysis...")
+    print("\nRunning AI infrastructure analysis...\n")
 
     result = ask_gemini(prompt, key)
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("AI INFRASTRUCTURE REVIEW")
-    print("="*80)
+    print("=" * 80)
 
     print(result)
 
-    print("="*80)
+    print("=" * 80)
+
+    with open("ai-infra-review.txt", "w") as f:
+        f.write(result)
+
+    print("\nReport saved to ai-infra-review.txt\n")
 
 
 if __name__ == "__main__":
