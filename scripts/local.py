@@ -494,82 +494,188 @@ TOP 10 RESOURCES BY COST:
     for res_type in sorted(cost_by_type.keys(), key=lambda x: cost_by_type[x], reverse=True)[:10]:
         summary += f"\n{res_type}: ${cost_by_type[res_type]:.2f}/month"
 
-    return f"""
-You are a senior cloud architect reviewing a Terraform pull request.
+    return f"""You are a cloud cost optimization expert analyzing AWS infrastructure costs.
 
-Inputs:
-1. Terraform plan (shows infrastructure changes)
-2. Checkov security scan results
-3. Infracost cost difference report
+ANALYZE THIS COST SUMMARY - PROVIDE DETAILED COST OPTIMIZATION STRATEGY:
 
-Your job is to analyze the new infrastructure changes compared to the existing environment.
+{summary}
 
-For each issue you detect provide:
+Your analysis MUST include specific technical and financial details:
 
-Finding
-Risk
-Cost Impact (if applicable)
-Root Cause
-Solution
-Terraform Fix Example
+1. RESOURCE-BY-RESOURCE OPTIMIZATION (focus on top 5 most expensive resources):
 
-Organize output under these sections:
+   For each expensive resource (>$100/month):
 
-Infrastructure Changes
-Security Issues
-Cost Impact
-Reliability Concerns
-Architecture Anti-Patterns
+   Current Configuration:
+   - Resource name: [actual resource name]
+   - Type: [instance/volume type]
+   - Current monthly cost: $XXX
+   - Annual cost: $XXX
 
-Guidelines for Solutions:
+   ALTERNATIVE OPTIONS (evaluate 2-3 similar types):
+   Option 1: [Downsized alternative type]
+   - Monthly cost: $XXX (savings: $XXX, or X% reduction)
+   - Feasibility: [LOW/MEDIUM/HIGH]
+   - Implementation effort: X hours
+   - Downtime risk: [None/Minimal/Significant]
+   - Performance impact: [None/Minimal/Significant]
+   - Testing needed: [what to validate]
+   - Recommendation: [RECOMMENDED/CONSIDER/NOT RECOMMENDED]
 
-The solution must include:
+   BEST CHOICE: [Which option with justification]
 
-1. Clear explanation of how to fix the issue
-2. Step-by-step remediation
-3. Terraform configuration example
+2. COST BREAKDOWN & COMPARISON TABLE:
+   Resource | Current Type | Monthly Cost | Recommended | Monthly Savings | Effort
+   ---------|--------------|-------------|-------------|-----------------|-------
+   [List top 5 most expensive resources with recommendations]
 
-Example format:
+   TOTAL MONTHLY SAVINGS POTENTIAL: $XXX
+   TOTAL ANNUAL SAVINGS: $XXX
 
-Security Issues
+3. SAVINGS OPPORTUNITIES BY PRIORITY:
 
-Finding:
-Security group allows SSH from 0.0.0.0/0
+   Compute Optimization:
+   - [Specific instance downsizing suggestions] = $XXX/month
+   - [Unused or oversized resources] = $XXX/month
 
-Risk:
-Anyone on the internet can attempt brute-force login.
+   Storage Optimization:
+   - [EBS volume adjustments] = $XXX/month
+   - [Unused volumes to delete] = $XXX/month
 
-Root Cause:
-Security group rule allows unrestricted inbound access.
+   Network Optimization:
+   - [NAT Gateway or data transfer reduction] = $XXX/month
 
-Solution:
-Restrict SSH access to specific trusted IP ranges or use a bastion host.
+4. IMPLEMENTATION ROADMAP:
 
-Steps to Fix:
-1. Identify trusted IP ranges
-2. Update security group rule
-3. Apply terraform changes
+   IMMEDIATE (within days - quick wins):
+   - [Delete unused resources]
+   - Savings: $XX/month
+   - Downtime: None
+   - Effort: 1-2 hours
 
-Terraform Fix Example:
+   SHORT-TERM (1-2 weeks - requires testing):
+   - [Instance downsizing or type changes]
+   - Savings: $XXX/month
+   - Downtime: [Specify if any]
+   - Effort: X hours (including testing)
 
-resource "aws_security_group_rule" "ssh_access" {{
-  type        = "ingress"
-  from_port   = 22
-  to_port     = 22
-  protocol    = "tcp"
-  cidr_blocks = ["10.0.0.0/24"]
-}}
+5. COST EFFICIENCY METRICS:
 
-Terraform Plan:
-{plan}
+   Current state: ${total_cost:.2f}/month (${total_cost*12:.2f}/year)
+   With optimizations: $XXX/month ($XXX/year)
 
-Checkov Results:
-{security}
+   Total savings potential: X% reduction
+   Cost Efficiency Grade: [A-F]
 
-Infracost Diff:
-{cost}
-"""
+   Break-even timeline: X weeks for any migration efforts
 
+PROVIDE SPECIFIC INSTANCE TYPES, EXACT NUMBERS, and feasibility analysis.
+Recommendation: [MERGE - COST ACCEPTABLE / MERGE - NEEDS COST OPTIMIZATION / BLOCK - EXCESSIVE COSTS]"""
+
+
+def build_executive_summary_prompt(security_analysis, cost_analysis):
+    """Create comprehensive executive summary combining both analyses"""
+
+    return f"""You are a CTO/Cloud Architect reviewing infrastructure audit findings for a PR merge decision.
+
+SYNTHESIZE THESE TWO ANALYSES INTO A STRATEGIC EXECUTIVE SUMMARY:
+
+SECURITY ANALYSIS FINDINGS:
+{security_analysis}
+
+---
+
+COST ANALYSIS FINDINGS:
+{cost_analysis}
+
+---
+
+CREATE AN EXECUTIVE REPORT FOR PR MERGE DECISION with:
+
+1. INFRASTRUCTURE HEALTH SCORECARD:
+   Overall Grade: [A-F with clear reasoning]
+   - What's the most critical issue preventing an A grade?
+
+   Security Grade: [A-F]
+   - List top 3 security issues preventing higher grade
+
+   Cost Efficiency Grade: [A-F]
+   - Is the infrastructure cost appropriate for what it does?
+
+   Compliance Status: [GREEN/YELLOW/RED]
+   - Any compliance violations?
+
+2. PR MERGE DECISION RECOMMENDATION:
+   ✓ APPROVE - Infrastructure is secure and cost-appropriate
+   ⚠ APPROVE WITH CONDITIONS - Fix these 2-3 items before/after merge:
+      1. [Issue with timeline]
+      2. [Issue with timeline]
+   ✗ REQUEST CHANGES - Block merge until these critical items are fixed:
+      1. [Critical issue with why it blocks]
+      2. [Critical issue]
+
+3. KEY METRICS & BUSINESS IMPACT:
+   Security Risks:
+   - Critical issues: [N] (what they are)
+   - High issues: [N] (what they are)
+   - Total effort to remediate: [X] hours
+   - Timeline: Can be fixed in [X] weeks
+
+   Cost Analysis:
+   - Monthly cost: $XXX (is this high/appropriate?)
+   - Savings potential: $XXX/month ([X]% reduction)
+   - Payback period: [X] weeks to break even on optimization effort
+   - Annual impact: $XXX/year in savings if optimized
+
+4. CRITICAL ITEMS FOR PR MERGE (if any):
+   [For each critical blocker, state exactly why it prevents merge]
+
+   Example:
+   - Open SSH access (port 22 to 0.0.0.0/0): ANY IP can gain shell access
+     Status: CRITICAL BLOCKER - Must be fixed before merge
+     Fix effort: 10 minutes (add restrict_security_group_rule)
+     Recommended action: Request changes, fix, then approve
+
+   - Database with no encryption: Customer data vulnerable to eavesdropping
+     Status: CRITICAL BLOCKER - Must be fixed before merge
+     Fix effort: 2-3 hours (create encrypted snapshot, restore)
+
+5. ITEMS THAT CAN BE FIXED POST-MERGE (optional):
+   [Non-blocking improvements]
+
+   Example:
+   - RDS downsizing from db.r5.2xlarge to db.r5.xlarge
+     Savings: $525.80/month
+     Effort: 8 hours (testing required)
+     Timeline: Can be done in Week 2
+     Risk: 15-30 min downtime for RDS failover
+     Recommendation: Fix after merge during maintenance window
+
+6. 30-DAY IMPLEMENTATION ROADMAP:
+
+   BEFORE MERGE (Address critical blockers):
+   [List items that must be done before merge]
+
+   WEEK 1 AFTER MERGE (Quick wins):
+   - [Delete unused EBS volumes: saves $XX/month, 1 hour effort]
+   - [Fix open SSH access: 10 minutes, zero downtime]
+
+   WEEK 2-3 (Cost optimization):
+   - [RDS downsizing: saves $XXX/month, 8 hours effort, 15-30 min downtime]
+
+   WEEK 4 (Architectural improvements):
+   - [Consider Reserved Instances if workload is stable]
+
+7. PR MERGE DECISION SUMMARY:
+   Should this PR be merged? YES / NO / CONDITIONAL
+
+   If CONDITIONAL, list the specific conditions and timeline.
+
+   If NO, explain which critical issues must be fixed first.
+
+   If YES, what should the team focus on in the next 30 days?
+
+Format as a clear, concise executive report suitable for engineering leadership/team leads to make a merge decision."""
 
 
 def ask_gemini(prompt, api_key, analysis_type="security"):
