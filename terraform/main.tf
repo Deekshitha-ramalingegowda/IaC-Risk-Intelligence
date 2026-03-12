@@ -17,7 +17,7 @@ resource "aws_security_group" "bad_sg" {
   }
 }
 
-# Security Group with open database port
+
 resource "aws_security_group" "db_exposed" {
   name        = "db-exposed-sg"
   description = "Database security group with exposed ports"

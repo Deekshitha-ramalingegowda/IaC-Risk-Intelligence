@@ -120,54 +120,126 @@ def extract_checkov_text(checkov_data):
     return "\n".join(lines)
 
 
+def _safe_float(value):
+    """Safely convert a value to float, returning 0.0 on failure."""
+    try:
+        return float(value or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _extract_resource_cost(resource):
+    """
+    Extract monthly cost from a single Infracost resource dict.
+    Infracost stores costs in costComponents and subresources.
+    New resources have monthlyCost on the resource itself OR only in components.
+    Returns (monthly_total, components_text_list).
+    """
+    monthly = 0.0
+    components = []
+
+    # Top-level monthlyCost on the resource (present in some versions)
+    monthly += _safe_float(resource.get("monthlyCost"))
+
+    for cost in resource.get("costComponents", []):
+        c = _safe_float(cost.get("monthlyCost"))
+        # Also check hourlyCost * 730 as fallback when monthlyCost is absent
+        if c == 0:
+            c = _safe_float(cost.get("hourlyCost")) * 730
+        monthly += c
+        desc = cost.get("description", "")
+        qty  = cost.get("monthlyQuantity") or cost.get("quantity") or ""
+        unit = cost.get("unit", "")
+        if desc:
+            components.append(
+                f"    * {desc}: {qty} {unit} = ${c:.2f}/mo"
+            )
+
+    for sub in resource.get("subresources", []):
+        sub_monthly = _safe_float(sub.get("monthlyCost"))
+        for cost in sub.get("costComponents", []):
+            sc = _safe_float(cost.get("monthlyCost"))
+            if sc == 0:
+                sc = _safe_float(cost.get("hourlyCost")) * 730
+            sub_monthly += sc
+        monthly += sub_monthly
+
+    return monthly, components
+
+
 def extract_infracost_text(infracost_data):
     """
     Convert Infracost JSON into compact plain-text cost breakdown.
-    Lists each resource, its cost components, and the total.
+    Handles both 'breakdown' (all resources) and 'diff' (changed resources),
+    and correctly processes new resources that have no prior baseline.
     """
     if not infracost_data:
         return "No Infracost data available."
 
-    total = float(infracost_data.get("totalMonthlyCost") or 0)
-    lines = [f"Total monthly cost: ${total:.2f}  (annual: ${total*12:.2f})\n"]
+    # ── Top-level totals ────────────────────────────────────────────────────
+    total_monthly = _safe_float(infracost_data.get("totalMonthlyCost"))
+    total_hourly  = _safe_float(infracost_data.get("totalHourlyCost"))
+    # If totalMonthlyCost is 0 but hourly exists, derive it
+    if total_monthly == 0 and total_hourly > 0:
+        total_monthly = total_hourly * 730
+
+    lines = [f"Total monthly cost: ${total_monthly:.2f}  (annual: ${total_monthly*12:.2f})\n"]
 
     resource_costs = []
 
     for project in infracost_data.get("projects", []):
-        for resource in project.get("breakdown", {}).get("resources", []):
-            name          = resource.get("name", "unknown")
-            resource_type = resource.get("resourceType", "")
-            monthly       = 0.0
-            components    = []
+        proj_name = project.get("name", "")
 
-            for cost in resource.get("costComponents", []):
-                try:
-                    c = float(cost.get("monthlyCost") or 0)
-                    monthly += c
-                    if c > 0:
-                        components.append(
-                            f"    * {cost.get('description','')}: "
-                            f"{cost.get('monthlyQuantity','')} "
-                            f"{cost.get('unit','')} = ${c:.2f}/mo"
-                        )
-                except (ValueError, TypeError):
-                    pass
+        # ── Try both 'breakdown' and 'diff' sections ────────────────────────
+        for section_key in ("breakdown", "diff"):
+            section = project.get(section_key, {})
+            resources = section.get("resources", [])
 
-            for sub in resource.get("subresources", []):
-                for cost in sub.get("costComponents", []):
-                    try:
-                        monthly += float(cost.get("monthlyCost") or 0)
-                    except (ValueError, TypeError):
-                        pass
+            # If breakdown/diff is absent, fall back to project-level resources
+            if not resources:
+                resources = project.get("resources", [])
 
-            if monthly > 0:
-                resource_costs.append((monthly, name, resource_type, components))
+            for resource in resources:
+                name  = resource.get("name", "unknown")
+                rtype = resource.get("resourceType", "")
 
-    resource_costs.sort(reverse=True)
+                monthly, components = _extract_resource_cost(resource)
 
-    for monthly, name, rtype, components in resource_costs:
+                # Last resort: if still 0, check resource-level hourlyCost
+                if monthly == 0:
+                    monthly = _safe_float(resource.get("hourlyCost")) * 730
+
+                # Include ALL resources (even $0) so Gemini can see them
+                resource_costs.append((monthly, name, rtype, components, proj_name, section_key))
+
+    # De-duplicate: keep the entry with the highest cost per resource name
+    seen: dict = {}
+    for entry in resource_costs:
+        monthly, name, *_ = entry
+        if name not in seen or monthly > seen[name][0]:
+            seen[name] = entry
+
+    resource_costs = sorted(seen.values(), reverse=True)
+
+    if not resource_costs:
+        lines.append("No resources found in Infracost output.")
+        lines.append("(Infracost may require INFRACOST_API_KEY or a valid cloud provider config.)")
+        return "\n".join(lines)
+
+    has_costs = any(m > 0 for m, *_ in resource_costs)
+    if not has_costs:
+        lines.append("⚠ All resources show $0.00 — Infracost could not price these resources.")
+        lines.append("  Possible causes:")
+        lines.append("  1. INFRACOST_API_KEY not set or invalid.")
+        lines.append("  2. Resources use data sources / variables Infracost cannot resolve.")
+        lines.append("  3. Resources are free-tier or not yet supported.")
+        lines.append("")
+        lines.append("Resources found (unpriced):")
+
+    for monthly, name, rtype, components, proj, section in resource_costs[:15]:
         label = f"{name} ({rtype})" if rtype else name
-        lines.append(f"{label}: ${monthly:.2f}/mo")
+        cost_str = f"${monthly:.2f}/mo" if monthly > 0 else "$0.00/mo (unpriced)"
+        lines.append(f"{label}: {cost_str}")
         lines.extend(components[:4])
         lines.append("")
 
@@ -255,6 +327,12 @@ CHECKOV RESULTS
 INFRACOST DIFF
 =====================================
 {cost}
+
+IMPORTANT: If resources show "$0.00 (unpriced)", Infracost could not fetch live prices
+(missing API key or unsupported resource). In that case, use the Terraform source above
+to estimate costs based on well-known AWS on-demand pricing for us-east-1, and clearly
+mark estimates with "(estimated)". Still produce the Cost Impact section with your best
+estimate rather than writing "None" or skipping it.
 """
 
 
@@ -353,6 +431,20 @@ def main():
 
     print("> Loading infracost-output.json ...")
     infracost_data = load_json_file("infracost-output.json")
+
+    # Debug: show what Infracost actually returned
+    if infracost_data:
+        top_keys = list(infracost_data.keys())
+        projects = infracost_data.get("projects", [])
+        total    = infracost_data.get("totalMonthlyCost", "missing")
+        print(f"  Infracost keys    : {top_keys}")
+        print(f"  totalMonthlyCost  : {total}")
+        print(f"  projects found    : {len(projects)}")
+        for i, p in enumerate(projects[:3]):
+            bdown = p.get("breakdown", {})
+            diff  = p.get("diff", {})
+            print(f"  project[{i}] breakdown resources: {len(bdown.get('resources', []))}")
+            print(f"  project[{i}] diff     resources: {len(diff.get('resources', []))}")
 
     print("> Loading Terraform source files ...")
     tf_sources = load_terraform_sources()
