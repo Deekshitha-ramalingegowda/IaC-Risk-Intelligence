@@ -6,7 +6,7 @@ resource "aws_instance" "app" {
 
   root_block_device {
     volume_type = "gp2"   
-    volume_size = 500     
+    volume_size = 500      
     encrypted   = false    
   }
 

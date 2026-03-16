@@ -373,8 +373,127 @@ def ask_gemini(prompt, api_key):
 
 
 # ============================================================================
-# REPORT SAVE
+# INLINE COMMENTS  (for GitHub "Files changed" tab)
 # ============================================================================
+
+# Severity mapping by check ID prefix / known checks
+SEVERITY_MAP = {
+    "CKV_AWS_8":   ("🔴 CRITICAL", "Root volume is unencrypted. Fix: add `encrypted = true` inside `root_block_device`."),
+    "CKV_AWS_135": ("🔴 CRITICAL", "EBS volume is unencrypted. Fix: add `encrypted = true`."),
+    "CKV_AWS_3":   ("🔴 CRITICAL", "S3 bucket allows public access. Fix: set all `block_public_*` to `true`."),
+    "CKV_AWS_19":  ("🔴 CRITICAL", "S3 bucket has no server-side encryption. Fix: add `aws_s3_bucket_server_side_encryption_configuration`."),
+    "CKV_AWS_17":  ("🔴 CRITICAL", "RDS instance is publicly accessible. Fix: `publicly_accessible = false`."),
+    "CKV_AWS_16":  ("🔴 CRITICAL", "RDS storage is not encrypted. Fix: `storage_encrypted = true`."),
+    "CKV_AWS_293": ("🔴 CRITICAL", "RDS has no backup retention. Fix: `backup_retention_period = 7`."),
+    "CKV_AWS_161": ("🔴 CRITICAL", "RDS uses hardcoded password. Fix: remove `password`, add `manage_master_user_password = true`."),
+    "CKV_AWS_25":  ("🔴 CRITICAL", "Security group allows unrestricted ingress. Fix: replace `0.0.0.0/0` with your VPN/app CIDR."),
+    "CKV_AWS_24":  ("🔴 CRITICAL", "Security group allows SSH (port 22) from anywhere. Fix: `cidr_blocks = [\"10.0.0.0/8\"]`."),
+    "CKV_AWS_23":  ("🔴 HIGH",     "Security group allows unrestricted egress. Fix: scope to specific CIDRs/ports."),
+    "CKV_AWS_40":  ("🔴 CRITICAL", "IAM policy uses wildcard Action `*`. Fix: scope to minimum required actions."),
+    "CKV_AWS_355": ("🔴 CRITICAL", "IAM policy uses wildcard Resource `*`. Fix: scope to specific ARNs."),
+    "CKV2_AWS_5":  ("🟡 HIGH",     "Security group is not attached to any resource. Verify it is in use or remove it."),
+    "CKV_AWS_79":  ("🟡 HIGH",     "EC2 instance metadata IMDSv2 not enforced. Fix: add `metadata_options { http_tokens = \"required\" }`."),
+    "CKV_AWS_126": ("🟡 MEDIUM",   "EC2 detailed monitoring disabled. Fix: `monitoring = true`."),
+}
+
+COST_CHECKS = {
+    # resource_type keyword → (label, suggestion)
+    "m5.2xlarge":   ("💸 COST",  "m5.2xlarge ≈ $277/mo. Consider t3.large (~$60/mo) or m5.large (~$70/mo) after benchmarking."),
+    "m5.4xlarge":   ("💸 COST",  "m5.4xlarge ≈ $553/mo. Consider m5.xlarge (~$138/mo) after benchmarking."),
+    "r5.2xlarge":   ("💸 COST",  "db.r5.2xlarge ≈ $700/mo. Consider db.t3.medium (~$60/mo) for dev or db.m5.large (~$140/mo) for prod."),
+    "r5.4xlarge":   ("💸 COST",  "db.r5.4xlarge ≈ $1,400/mo. Consider db.r5.xlarge (~$350/mo) after load testing."),
+    "volume_size.*500": ("💸 COST", "500 GB EBS volume ≈ $50/mo. Right-size to actual usage (typically 20–50 GB for OS)."),
+    "volume_size.*1000":("💸 COST", "1,000 GB EBS volume ≈ $115/mo. Reduce to actual DB data size + 20% headroom."),
+    "gp2":          ("💸 COST",  "gp2 volume type is 20% more expensive than gp3 with lower baseline IOPS. Fix: `volume_type = \"gp3\"`."),
+    "allocated_storage.*1000": ("💸 COST", "1,000 GB allocated storage ≈ $115/mo. Reduce to actual need (e.g. 100 GB)."),
+}
+
+
+def build_inline_comments(checkov_data, tf_sources_raw):
+    """
+    Build a list of inline comment dicts ready for GitHub's
+    pulls.createReviewComment API:
+      { path, line, body }
+
+    Sources:
+    - Checkov failed_checks  → security comments (exact file + line from Checkov)
+    - tf_sources_raw         → cost comments (scan for expensive patterns)
+    """
+    comments = []
+    seen = set()   # deduplicate (path, line)
+
+    # ── 1. Security comments from Checkov ────────────────────────────────────
+    failed = checkov_data.get("results", {}).get("failed_checks", []) if checkov_data else []
+
+    for check in failed:
+        check_id   = check.get("check_id", "")
+        file_path  = check.get("file_path", "").lstrip("/")
+        line_range = check.get("file_line_range", [])
+        check_name = check.get("check_name", "")
+        resource   = check.get("resource", "")
+
+        if not file_path or not line_range:
+            continue
+
+        # GitHub inline comments attach to the last line of the block
+        line = line_range[1] if len(line_range) == 2 else line_range[0]
+        key  = (file_path, line, check_id)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        severity, fix_hint = SEVERITY_MAP.get(
+            check_id,
+            ("🟡 MEDIUM", f"Review `{check_name}` for resource `{resource}`."),
+        )
+
+        body = (
+            f"**{severity} — [{check_id}]** `{resource}`\n\n"
+            f"> {fix_hint}"
+        )
+        comments.append({"path": file_path, "line": line, "body": body})
+
+    # ── 2. Cost comments from raw .tf source ─────────────────────────────────
+    import re
+
+    for search_dir in ["terraform", "."]:
+        base = Path(search_dir)
+        if not base.is_dir():
+            continue
+        tf_files = sorted(base.rglob("*.tf"))
+        if not tf_files:
+            continue
+
+        for tf_path in tf_files:
+            try:
+                rel_path = str(tf_path).lstrip("./")
+                file_lines = tf_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except Exception:
+                continue
+
+            for lineno, raw_line in enumerate(file_lines, start=1):
+                stripped = raw_line.strip()
+                for pattern, (label, hint) in COST_CHECKS.items():
+                    if re.search(pattern, stripped):
+                        key = (rel_path, lineno, pattern)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        body = f"**{label}** — {hint}"
+                        comments.append({"path": rel_path, "line": lineno, "body": body})
+        break   # stop after first dir that has .tf files
+
+    return comments
+
+
+def save_inline_comments(comments, output_dir="."):
+    path = f"{output_dir}/inline-comments.json"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(comments, f, indent=2)
+        print(f"  Saved: {path}  ({len(comments)} inline comments)")
+    except Exception as e:
+        print(f"  Could not save inline-comments.json: {e}")
 
 def save_report(report, output_dir="."):
     """Save the PR comment markdown and a JSON artifact."""
@@ -470,10 +589,16 @@ def main():
     print("\n> Saving reports ...")
     save_report(report)
 
+    # Build and save inline comments for "Files changed" tab
+    print("\n> Building inline comments ...")
+    inline_comments = build_inline_comments(checkov_data, tf_sources)
+    save_inline_comments(inline_comments)
+
     print("\nDone.")
-    print("  infrastructure-analysis-report.md   <- PR comment")
+    print("  infrastructure-analysis-report.md   <- PR summary comment")
     print("  infrastructure-analysis-report.json <- artifact")
     print("  infrastructure-analysis-summary.txt <- notification snippet")
+    print("  inline-comments.json                <- Files changed tab comments")
 
 
 if __name__ == "__main__":
