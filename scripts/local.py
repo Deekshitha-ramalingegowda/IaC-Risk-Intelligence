@@ -19,10 +19,6 @@ MODELS = [
     "models/gemini-2.5-pro",
 ]
 
-# ============================================================================
-# FILE LOADING
-# ============================================================================
-
 def load_json_file(filename):
     """Load JSON file, trying multiple encodings."""
     for encoding in ['utf-8-sig', 'utf-16', 'utf-16-le', 'utf-8', 'latin-1']:
@@ -72,11 +68,6 @@ def get_gemini_key():
         sys.exit(1)
     return key
 
-
-# ============================================================================
-# DATA EXTRACTION  (Checkov + Infracost -> compact plain-text)
-# ============================================================================
-
 def extract_checkov_text(checkov_data):
     """
     Convert Checkov JSON into compact plain-text Checkov results.
@@ -99,7 +90,7 @@ def extract_checkov_text(checkov_data):
         resource   = check.get("resource", "")
         file_path  = check.get("file_path", "")
         line_range = check.get("file_line_range", [])
-        code_block = check.get("code_block", [])   # [[line_no, text], ...]
+        code_block = check.get("code_block", [])
 
         loc = file_path
         if len(line_range) == 2:
@@ -176,10 +167,8 @@ def extract_infracost_text(infracost_data):
     if not infracost_data:
         return "No Infracost data available."
 
-    # ── Top-level totals ────────────────────────────────────────────────────
     total_monthly = _safe_float(infracost_data.get("totalMonthlyCost"))
     total_hourly  = _safe_float(infracost_data.get("totalHourlyCost"))
-    # If totalMonthlyCost is 0 but hourly exists, derive it
     if total_monthly == 0 and total_hourly > 0:
         total_monthly = total_hourly * 730
 
@@ -190,12 +179,10 @@ def extract_infracost_text(infracost_data):
     for project in infracost_data.get("projects", []):
         proj_name = project.get("name", "")
 
-        # ── Try both 'breakdown' and 'diff' sections ────────────────────────
         for section_key in ("breakdown", "diff"):
             section = project.get(section_key, {})
             resources = section.get("resources", [])
 
-            # If breakdown/diff is absent, fall back to project-level resources
             if not resources:
                 resources = project.get("resources", [])
 
@@ -212,7 +199,6 @@ def extract_infracost_text(infracost_data):
                 # Include ALL resources (even $0) so Gemini can see them
                 resource_costs.append((monthly, name, rtype, components, proj_name, section_key))
 
-    # De-duplicate: keep the entry with the highest cost per resource name
     seen: dict = {}
     for entry in resource_costs:
         monthly, name, *_ = entry
@@ -253,12 +239,8 @@ def extract_terraform_plan_text(tf_sources):
     """
     if not tf_sources:
         return "No Terraform source available."
-    return tf_sources[:12000]   # cap to avoid token overflow
+    return tf_sources[:12000]
 
-
-# ============================================================================
-# SINGLE PROMPT
-# ============================================================================
 
 ANALYSIS_PROMPT = """\
 You are a senior cloud architect reviewing a Terraform pull request.
@@ -343,11 +325,6 @@ def build_prompt(plan_text, checkov_text, infracost_text):
         cost=infracost_text,
     )
 
-
-# ============================================================================
-# GEMINI CALL
-# ============================================================================
-
 def ask_gemini(prompt, api_key):
     print("\n> Querying Gemini ...\n")
     client = genai.Client(api_key=api_key)
@@ -372,40 +349,35 @@ def ask_gemini(prompt, api_key):
     return "Gemini analysis failed -- check API key and model availability."
 
 
-# ============================================================================
-# INLINE COMMENTS  (for GitHub "Files changed" tab)
-# ============================================================================
-
-# Severity mapping by check ID prefix / known checks
 SEVERITY_MAP = {
-    "CKV_AWS_8":   ("🔴 CRITICAL", "Root volume is unencrypted. Fix: add `encrypted = true` inside `root_block_device`."),
-    "CKV_AWS_135": ("🔴 CRITICAL", "EBS volume is unencrypted. Fix: add `encrypted = true`."),
-    "CKV_AWS_3":   ("🔴 CRITICAL", "S3 bucket allows public access. Fix: set all `block_public_*` to `true`."),
-    "CKV_AWS_19":  ("🔴 CRITICAL", "S3 bucket has no server-side encryption. Fix: add `aws_s3_bucket_server_side_encryption_configuration`."),
-    "CKV_AWS_17":  ("🔴 CRITICAL", "RDS instance is publicly accessible. Fix: `publicly_accessible = false`."),
-    "CKV_AWS_16":  ("🔴 CRITICAL", "RDS storage is not encrypted. Fix: `storage_encrypted = true`."),
-    "CKV_AWS_293": ("🔴 CRITICAL", "RDS has no backup retention. Fix: `backup_retention_period = 7`."),
-    "CKV_AWS_161": ("🔴 CRITICAL", "RDS uses hardcoded password. Fix: remove `password`, add `manage_master_user_password = true`."),
-    "CKV_AWS_25":  ("🔴 CRITICAL", "Security group allows unrestricted ingress. Fix: replace `0.0.0.0/0` with your VPN/app CIDR."),
-    "CKV_AWS_24":  ("🔴 CRITICAL", "Security group allows SSH (port 22) from anywhere. Fix: `cidr_blocks = [\"10.0.0.0/8\"]`."),
-    "CKV_AWS_23":  ("🔴 HIGH",     "Security group allows unrestricted egress. Fix: scope to specific CIDRs/ports."),
-    "CKV_AWS_40":  ("🔴 CRITICAL", "IAM policy uses wildcard Action `*`. Fix: scope to minimum required actions."),
-    "CKV_AWS_355": ("🔴 CRITICAL", "IAM policy uses wildcard Resource `*`. Fix: scope to specific ARNs."),
-    "CKV2_AWS_5":  ("🟡 HIGH",     "Security group is not attached to any resource. Verify it is in use or remove it."),
-    "CKV_AWS_79":  ("🟡 HIGH",     "EC2 instance metadata IMDSv2 not enforced. Fix: add `metadata_options { http_tokens = \"required\" }`."),
-    "CKV_AWS_126": ("🟡 MEDIUM",   "EC2 detailed monitoring disabled. Fix: `monitoring = true`."),
+    "CKV_AWS_8":   (" CRITICAL", "Root volume is unencrypted. Fix: add `encrypted = true` inside `root_block_device`."),
+    "CKV_AWS_135": (" CRITICAL", "EBS volume is unencrypted. Fix: add `encrypted = true`."),
+    "CKV_AWS_3":   (" CRITICAL", "S3 bucket allows public access. Fix: set all `block_public_*` to `true`."),
+    "CKV_AWS_19":  (" CRITICAL", "S3 bucket has no server-side encryption. Fix: add `aws_s3_bucket_server_side_encryption_configuration`."),
+    "CKV_AWS_17":  (" CRITICAL", "RDS instance is publicly accessible. Fix: `publicly_accessible = false`."),
+    "CKV_AWS_16":  (" CRITICAL", "RDS storage is not encrypted. Fix: `storage_encrypted = true`."),
+    "CKV_AWS_293": (" CRITICAL", "RDS has no backup retention. Fix: `backup_retention_period = 7`."),
+    "CKV_AWS_161": (" CRITICAL", "RDS uses hardcoded password. Fix: remove `password`, add `manage_master_user_password = true`."),
+    "CKV_AWS_25":  (" CRITICAL", "Security group allows unrestricted ingress. Fix: replace `0.0.0.0/0` with your VPN/app CIDR."),
+    "CKV_AWS_24":  (" CRITICAL", "Security group allows SSH (port 22) from anywhere. Fix: `cidr_blocks = [\"10.0.0.0/8\"]`."),
+    "CKV_AWS_23":  (" HIGH",     "Security group allows unrestricted egress. Fix: scope to specific CIDRs/ports."),
+    "CKV_AWS_40":  (" CRITICAL", "IAM policy uses wildcard Action `*`. Fix: scope to minimum required actions."),
+    "CKV_AWS_355": (" CRITICAL", "IAM policy uses wildcard Resource `*`. Fix: scope to specific ARNs."),
+    "CKV2_AWS_5":  (" HIGH",     "Security group is not attached to any resource. Verify it is in use or remove it."),
+    "CKV_AWS_79":  (" HIGH",     "EC2 instance metadata IMDSv2 not enforced. Fix: add `metadata_options { http_tokens = \"required\" }`."),
+    "CKV_AWS_126": (" MEDIUM",   "EC2 detailed monitoring disabled. Fix: `monitoring = true`."),
 }
 
 COST_CHECKS = {
     # resource_type keyword → (label, suggestion)
-    "m5.2xlarge":   ("💸 COST",  "m5.2xlarge ≈ $277/mo. Consider t3.large (~$60/mo) or m5.large (~$70/mo) after benchmarking."),
-    "m5.4xlarge":   ("💸 COST",  "m5.4xlarge ≈ $553/mo. Consider m5.xlarge (~$138/mo) after benchmarking."),
-    "r5.2xlarge":   ("💸 COST",  "db.r5.2xlarge ≈ $700/mo. Consider db.t3.medium (~$60/mo) for dev or db.m5.large (~$140/mo) for prod."),
-    "r5.4xlarge":   ("💸 COST",  "db.r5.4xlarge ≈ $1,400/mo. Consider db.r5.xlarge (~$350/mo) after load testing."),
-    "volume_size.*500": ("💸 COST", "500 GB EBS volume ≈ $50/mo. Right-size to actual usage (typically 20–50 GB for OS)."),
-    "volume_size.*1000":("💸 COST", "1,000 GB EBS volume ≈ $115/mo. Reduce to actual DB data size + 20% headroom."),
-    "gp2":          ("💸 COST",  "gp2 volume type is 20% more expensive than gp3 with lower baseline IOPS. Fix: `volume_type = \"gp3\"`."),
-    "allocated_storage.*1000": ("💸 COST", "1,000 GB allocated storage ≈ $115/mo. Reduce to actual need (e.g. 100 GB)."),
+    "m5.2xlarge":   (" COST",  "m5.2xlarge ≈ $277/mo. Consider t3.large (~$60/mo) or m5.large (~$70/mo) after benchmarking."),
+    "m5.4xlarge":   (" COST",  "m5.4xlarge ≈ $553/mo. Consider m5.xlarge (~$138/mo) after benchmarking."),
+    "r5.2xlarge":   (" COST",  "db.r5.2xlarge ≈ $700/mo. Consider db.t3.medium (~$60/mo) for dev or db.m5.large (~$140/mo) for prod."),
+    "r5.4xlarge":   (" COST",  "db.r5.4xlarge ≈ $1,400/mo. Consider db.r5.xlarge (~$350/mo) after load testing."),
+    "volume_size.*500": (" COST", "500 GB EBS volume ≈ $50/mo. Right-size to actual usage (typically 20–50 GB for OS)."),
+    "volume_size.*1000":(" COST", "1,000 GB EBS volume ≈ $115/mo. Reduce to actual DB data size + 20% headroom."),
+    "gp2":          (" COST",  "gp2 volume type is 20% more expensive than gp3 with lower baseline IOPS. Fix: `volume_type = \"gp3\"`."),
+    "allocated_storage.*1000": (" COST", "1,000 GB allocated storage ≈ $115/mo. Reduce to actual need (e.g. 100 GB)."),
 }
 
 
@@ -420,9 +392,8 @@ def build_inline_comments(checkov_data, tf_sources_raw):
     - tf_sources_raw         → cost comments (scan for expensive patterns)
     """
     comments = []
-    seen = set()   # deduplicate (path, line)
+    seen = set()
 
-    # ── 1. Security comments from Checkov ────────────────────────────────────
     failed = checkov_data.get("results", {}).get("failed_checks", []) if checkov_data else []
 
     for check in failed:
@@ -453,7 +424,6 @@ def build_inline_comments(checkov_data, tf_sources_raw):
         )
         comments.append({"path": file_path, "line": line, "body": body})
 
-    # ── 2. Cost comments from raw .tf source ─────────────────────────────────
     import re
 
     for search_dir in ["terraform", "."]:
@@ -529,10 +499,6 @@ def save_report(report, output_dir="."):
     except Exception as e:
         print(f"  Could not save summary: {e}")
 
-
-# ============================================================================
-# MAIN
-# ============================================================================
 
 def main():
     api_key = get_gemini_key()
