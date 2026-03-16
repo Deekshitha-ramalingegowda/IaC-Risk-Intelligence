@@ -1,6 +1,6 @@
 resource "aws_instance" "app" {
   ami               = "ami-0c55b159cbfafe1f0"
-  instance_type     = "t3.large" 
+  instance_type     = "m5.2xlarge" 
   monitoring        = false        
   ebs_optimized     = false        
 
