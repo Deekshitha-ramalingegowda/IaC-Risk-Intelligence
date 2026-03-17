@@ -17,10 +17,3 @@ resource "aws_instance" "app" {
     Name = "app-server"
   }
 }
-
-
-
-
-
-
-
