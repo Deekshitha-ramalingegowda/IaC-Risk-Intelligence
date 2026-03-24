@@ -14,7 +14,7 @@ variable "ami" {
 variable "ec2_instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "m5.2xlarge"   # intentionally oversized for cost issue demo
+  default     = "t3.large"   # intentionally oversized for cost issue demo
 }
 
 variable "ec2_volume_size" {

@@ -1,7 +1,7 @@
 resource "aws_instance" "app" {
   ami           = var.ami
   instance_type = var.ec2_instance_type   # COST: m5.2xlarge is oversized (~$277/mo)
-  monitoring    = false                   # SECURITY: detailed monitoring disabled (CKV_AWS_126)
+  monitoring    = false                # SECURITY: detailed monitoring disabled (CKV_AWS_126)
 
   metadata_options {
     http_tokens   = "required"
