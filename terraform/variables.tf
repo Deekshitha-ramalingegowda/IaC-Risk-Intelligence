@@ -19,3 +19,6 @@ variable "db_instance_class"      { default = "db.t3.medium" }
 variable "db_allocated_storage"   { default = 50 }
 variable "db_name"                { type = string }
 variable "rds_monitoring_role_arn" { type = string }
+
+
+
