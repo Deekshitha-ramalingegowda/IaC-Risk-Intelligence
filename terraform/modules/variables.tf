@@ -1,11 +1,11 @@
-# ── Shared ──────────────────────────────────────────────────────────────────
+# ── Shared ───────────────────────────────────────────────────────────────────
 variable "tags" {
   description = "Common tags applied to all resources"
   type        = map(string)
   default     = {}
 }
 
-# ── EC2 ─────────────────────────────────────────────────────────────────────
+# ── EC2 ──────────────────────────────────────────────────────────────────────
 variable "ami" {
   description = "AMI ID for the EC2 instance"
   type        = string
@@ -14,7 +14,7 @@ variable "ami" {
 variable "ec2_instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "m5.large"
+  default     = "m5.2xlarge"   # intentionally oversized for cost issue demo
 }
 
 variable "ec2_volume_size" {
@@ -23,13 +23,13 @@ variable "ec2_volume_size" {
   default     = 50
 }
 
-# ── S3 ──────────────────────────────────────────────────────────────────────
+# ── S3 ───────────────────────────────────────────────────────────────────────
 variable "bucket_name" {
   description = "S3 bucket name"
   type        = string
 }
 
-# ── VPC ─────────────────────────────────────────────────────────────────────
+# ── VPC ──────────────────────────────────────────────────────────────────────
 variable "vpc_cidr" {
   description = "CIDR block for the VPC"
   type        = string
@@ -37,7 +37,7 @@ variable "vpc_cidr" {
 }
 
 variable "private_subnets" {
-  description = "Map of AZ key to subnet CIDR, e.g. { a = '10.0.1.0/24' }"
+  description = "Map of AZ key to subnet CIDR"
   type        = map(string)
   default = {
     a = "10.0.1.0/24"
@@ -55,7 +55,7 @@ variable "flow_log_destination" {
   type        = string
 }
 
-# ── RDS ─────────────────────────────────────────────────────────────────────
+# ── RDS ──────────────────────────────────────────────────────────────────────
 variable "db_engine" {
   description = "RDS database engine"
   type        = string
@@ -84,3 +84,9 @@ variable "db_name" {
   description = "Initial database name"
   type        = string
 }
+
+variable "rds_monitoring_role_arn" {
+  description = "IAM role ARN for RDS enhanced monitoring"
+  type        = string
+}
+

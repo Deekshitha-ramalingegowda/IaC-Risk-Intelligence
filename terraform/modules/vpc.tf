@@ -20,8 +20,8 @@ resource "aws_flow_log" "app" {
 }
 
 resource "aws_default_security_group" "app" {
-  vpc_id = aws_vpc.app.id
-
+  vpc_id  = aws_vpc.app.id
   ingress = []
   egress  = []
 }
+

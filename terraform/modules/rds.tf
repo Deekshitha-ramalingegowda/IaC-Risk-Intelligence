@@ -14,8 +14,16 @@ resource "aws_db_instance" "app" {
   auto_minor_version_upgrade          = true
   iam_database_authentication_enabled = true
   deletion_protection                 = true
+  copy_tags_to_snapshot               = true
+
+  performance_insights_enabled          = true
+  performance_insights_retention_period = 7
+
+  monitoring_interval = 60
+  monitoring_role_arn = var.rds_monitoring_role_arn
 
   enabled_cloudwatch_logs_exports = ["error", "slowquery", "general"]
 
   tags = var.tags
 }
+
