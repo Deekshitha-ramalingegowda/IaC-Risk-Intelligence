@@ -1,30 +1,21 @@
-variable "project_name" {
-  type = string
-}
+variable "project_name" {}
+variable "vpc_id" {}
+variable "subnet_id" {}
+variable "ami_id" {}
 
-variable "vpc_id" {
-  type = string
-}
-
-variable "subnet_id" {
-  type = string
-}
-
-variable "ec2_instance_type" {
-  type    = string
-  default = "m5.2xlarge"
-}
-
-variable "ami_id" {
-  type = string
+variable "instance_type" {
+  default = "t3.micro"
 }
 
 variable "key_name" {
-  type    = string
-  default = ""
+  default = null
+}
+
+variable "allowed_cidr" {
+  type    = list(string)
+  default = ["0.0.0.0/0"] # ⚠ restrict in prod
 }
 
 variable "tags" {
-  type    = map(string)
-  default = {}
+  type = map(string)
 }
