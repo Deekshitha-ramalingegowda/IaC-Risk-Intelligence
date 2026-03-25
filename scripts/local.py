@@ -154,35 +154,52 @@ def format_infracost_for_prompt(total, resource_costs):
 ANALYSIS_PROMPT = """\
 You are a senior cloud security and cost engineer reviewing a Terraform pull request.
 
-Produce EXACTLY the two Markdown sections below — nothing before, nothing after.
+For each failed security check and cost issue identified, produce a detailed recommendation in this format:
 
-## 🔐 Security Issues
+---
 
-For EVERY Checkov failed check, one table row:
-| Severity | Check ID | Resource | File:Lines | Fix |
-|----------|----------|----------|------------|-----|
+## Security Issue / Cost Impact
 
-After the table, for each HIGH/MEDIUM issue add:
-### `CHECK_ID` – Title
-**Why it matters:** One sentence.
-**Fix:**
+**Finding:** [What was found in the code]
+**Risk:** [Why this is a problem - business impact, security exposure, etc.]
+**Root Cause:** [Technical reason why this exists in the code]
+**Solution:** [High-level approach to fix]
+
+### Steps to Fix
+1. [Step 1]
+2. [Step 2]
+3. [Step 3]
+
+### Terraform Fix Example
 ```hcl
-<corrected snippet>
+<corrected code snippet with proper indentation>
 ```
 
-## 💰 Cost Impact
+---
 
-| Resource | Type/Config | Monthly | Annual | Recommendation |
-|----------|-------------|---------|--------|----------------|
+For COST issues, also include:
+| Aspect | Details |
+|--------|---------|
+| **Resource** | Resource name |
+| **Previous Cost** | $X/month |
+| **New Cost** | $Y/month |
+| **Increase** | +$Z/month |
+| **Risk** | [Impact of no action] |
+| **Solution** | [How to avoid cost] |
 
-### Cost Summary
-**Current total:** $X/mo
-**Optimised total:** $X/mo
-**Potential saving:** $X/mo
+### Terraform Cost Fix Example
+```hcl
+<optimized resource configuration>
+```
 
-Rules:
-- Reference exact file paths and line numbers from the source below.
-- If a section has zero items, write: *(none)*
+---
+
+IMPORTANT:
+- Identify the exact file path and line numbers for each issue
+- Provide real, actionable Terraform code that can be copy-pasted
+- For security issues, explain the attack vector or compliance impact
+- For cost issues, show both before and after costs
+- Focus on the most critical HIGH/MEDIUM severity issues first
 
 =============================================================
 TERRAFORM SOURCE
