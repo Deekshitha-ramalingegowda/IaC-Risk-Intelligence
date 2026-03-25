@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-"""
-infrastructure-analysis.py
-Clean version: no summary, no noise, only real issues
-"""
 
-import os, sys, json, re
+import os
+import sys
+import json
+import re
 from pathlib import Path
 from datetime import datetime
 
 try:
     from google import genai
 except ImportError:
-    print("google-genai not installed. Run: pip install google-genai")
+    print("google-genai is not installed. Run: pip install google-genai")
     sys.exit(1)
 
-# ---------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------
 
 MODELS = [
     "models/gemini-2.5-flash",
@@ -24,132 +20,380 @@ MODELS = [
     "models/gemini-2.5-pro",
 ]
 
-TERRAFORM_DIR = os.getenv("TERRAFORM_DIR", "terraform")
 
-# Ignore low-value checks
-IGNORE_CHECKS = {
-    "CKV_AWS_130",
-    "CKV_AWS_260",
-    "CKV_AWS_277"
-}
-
-# ---------------------------------------------------------------------
+# ============================================================================
 # FILE LOADING
-# ---------------------------------------------------------------------
+# ============================================================================
 
 def load_json_file(filename):
-    for enc in ["utf-8-sig", "utf-16", "utf-8"]:
+    for encoding in ["utf-8-sig", "utf-16", "utf-16-le", "utf-8", "latin-1"]:
         try:
-            with open(filename, "r", encoding=enc) as f:
+            with open(filename, "r", encoding=encoding) as f:
                 return json.load(f)
-        except Exception:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             continue
+    print(f"Error: Could not parse {filename}")
     return None
 
 
-def load_terraform_sources(terraform_dir=TERRAFORM_DIR):
-    sources = {}
-    base = Path(terraform_dir)
-
-    if base.is_dir():
-        for tf in base.rglob("*.tf"):
+def load_terraform_sources(terraform_dir="terraform"):
+    for search_dir in [terraform_dir, "."]:
+        base = Path(search_dir)
+        if not base.is_dir():
+            continue
+        tf_files = sorted(base.rglob("*.tf"))
+        if not tf_files:
+            continue
+        parts = []
+        for tf_path in tf_files:
             try:
-                sources[str(tf)] = tf.read_text(encoding="utf-8", errors="replace")
+                content = tf_path.read_text(encoding="utf-8", errors="replace")
+                numbered = "\n".join(
+                    f"{i+1:4d}  {line}"
+                    for i, line in enumerate(content.splitlines())
+                )
+                parts.append(f"\n# -- {tf_path} --\n{numbered}")
             except Exception:
-                continue
-
-    return sources
+                pass
+        if parts:
+            return "\n".join(parts)
+    return ""
 
 
 def get_gemini_key():
     key = os.getenv("GEMINI_API_KEY")
     if not key:
-        print("[ERROR] GEMINI_API_KEY not set")
+        print("GEMINI_API_KEY not set.")
+        print("  Get key : https://aistudio.google.com/app/apikey")
+        print("  Then run: export GEMINI_API_KEY=AIzaSy...")
         sys.exit(1)
     return key
 
 
-# ---------------------------------------------------------------------
-# CHECKOV
-# ---------------------------------------------------------------------
+# ============================================================================
+# DATA EXTRACTION
+# ============================================================================
 
-def extract_checkov_data(checkov_raw):
-    results = checkov_raw.get("results", {})
-
-    failed = [
-        c for c in results.get("failed_checks", [])
-        if c.get("check_id") not in IGNORE_CHECKS
-    ]
-
-    passed = len(results.get("passed_checks", []))
-
-    return failed, passed
-
-
-def format_checkov_for_prompt(failed, passed):
+def extract_checkov_text(checkov_data):
+    if not checkov_data:
+        return "No Checkov data available."
+    failed = checkov_data.get("results", {}).get("failed_checks", [])
+    passed = checkov_data.get("results", {}).get("passed_checks", [])
     if not failed:
-        return f"All {passed} checks passed."
-
-    lines = [f"FAILED: {len(failed)} PASSED: {passed}\n"]
-
-    for c in failed:
-        cid = c.get("check_id")
-        res = c.get("resource")
-        path = c.get("file_path")
-        lr = c.get("file_line_range", [])
-
-        loc = f"{path}:{lr[0]}-{lr[1]}" if len(lr) == 2 else path
-        lines.append(f"{cid} | {res} | {loc}")
-
+        return f"All checks passed ({len(passed)} checks)."
+    lines = [f"Failed: {len(failed)}   Passed: {len(passed)}\n"]
+    for check in failed:
+        check_id   = check.get("check_id", "")
+        check_name = check.get("check_name", "")
+        resource   = check.get("resource", "")
+        file_path  = check.get("file_path", "")
+        line_range = check.get("file_line_range", [])
+        loc = file_path
+        if len(line_range) == 2:
+            loc += f":{line_range[0]}-{line_range[1]}"
+        lines.append(f"[{check_id}] {resource}  ({loc})")
+        lines.append(f"  Rule: {check_name}")
+        lines.append("")
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------
-# INFRACOST
-# ---------------------------------------------------------------------
-
-def extract_infracost_data(data):
-    total = float(data.get("totalMonthlyCost") or 0)
-    return total, []
+def _safe_float(value):
+    try:
+        return float(value or 0)
+    except (ValueError, TypeError):
+        return 0.0
 
 
-def format_infracost_for_prompt(total, _):
-    return f"TOTAL MONTHLY COST: ${total:.2f}"
+def extract_infracost_text(infracost_data):
+    if not infracost_data:
+        return "No Infracost data available."
+    total_monthly = _safe_float(infracost_data.get("totalMonthlyCost"))
+    total_hourly  = _safe_float(infracost_data.get("totalHourlyCost"))
+    if total_monthly == 0 and total_hourly > 0:
+        total_monthly = total_hourly * 730
+    lines = [f"Total monthly cost: ${total_monthly:.2f}  (annual: ${total_monthly*12:.2f})\n"]
+    resource_costs = []
+    for project in infracost_data.get("projects", []):
+        for section_key in ("breakdown", "diff"):
+            section   = project.get(section_key, {})
+            resources = section.get("resources", []) or project.get("resources", [])
+            for resource in resources:
+                name  = resource.get("name", "unknown")
+                rtype = resource.get("resourceType", "")
+                monthly = _safe_float(resource.get("monthlyCost"))
+                if monthly == 0:
+                    monthly = _safe_float(resource.get("hourlyCost")) * 730
+                resource_costs.append((monthly, name, rtype))
+    seen: dict = {}
+    for entry in resource_costs:
+        monthly, name, *_ = entry
+        if name not in seen or monthly > seen[name][0]:
+            seen[name] = entry
+    resource_costs = sorted(seen.values(), reverse=True)
+    for monthly, name, rtype in resource_costs[:10]:
+        label    = f"{name} ({rtype})" if rtype else name
+        cost_str = f"${monthly:.2f}/mo" if monthly > 0 else "$0.00/mo (unpriced)"
+        lines.append(f"{label}: {cost_str}")
+    return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------
-# PROMPT (CLEAN)
-# ---------------------------------------------------------------------
+# ============================================================================
+# SLIM GEMINI PROMPT  — two sections only, minimal tokens
+# ============================================================================
 
-ANALYSIS_PROMPT = """
-You are a senior DevOps and cloud security engineer reviewing Terraform code.
+ANALYSIS_PROMPT = """\
+You are a cloud infrastructure reviewer. Analyze the Terraform changes below.
 
-ONLY report REAL issues.
+Output EXACTLY two sections, nothing else — no introduction, no conclusion, no markdown headers outside what is shown.
 
-IGNORE:
-- Missing descriptions
-- Naming conventions
-- Cosmetic issues
+## Security Issues
+For each Checkov failed check, one line per issue:
+[SEVERITY] check_id | resource | file:line | one-sentence fix
 
-FOCUS ONLY ON:
-- Security risks (open access, IMDS, encryption, IAM exposure)
-- Cost issues (oversized instances, unnecessary resources)
+## Cost Impact
+For each resource with a cost concern, one line:
+resource_name | instance_type_or_config | estimated $/mo | one-sentence fix
+End the section with one summary line: TOTAL ESTIMATED: $X/mo
 
---------------------------------------------------
+Rules:
+- If a section has no items write: (none)
+- Maximum 2 sentences per line, no bullet sub-items
+- Reference exact file and line number from the Terraform source
 
-Security Issue:
+=====================================
+TERRAFORM SOURCE
+=====================================
+{plan}
 
-Finding:
-Risk:
-Root Cause:
-Solution:
+=====================================
+CHECKOV FAILED CHECKS
+=====================================
+{security}
 
-Steps to Fix:
-1.
-2.
-3.
-
-Terraform Fix:
-```hcl
-# corrected code
+=====================================
+INFRACOST DIFF
+=====================================
+{cost}
 """
+
+
+def build_prompt(plan_text, checkov_text, infracost_text):
+    # Only feed the modules/ec2.tf source to keep tokens minimal
+    ec2_lines = []
+    in_ec2 = False
+    for line in plan_text.splitlines():
+        if "modules/ec2.tf" in line or "modules\\ec2.tf" in line:
+            in_ec2 = True
+        elif line.startswith("# -- ") and in_ec2:
+            in_ec2 = False
+        if in_ec2:
+            ec2_lines.append(line)
+    ec2_source = "\n".join(ec2_lines) if ec2_lines else plan_text[:4000]
+
+    return ANALYSIS_PROMPT.format(
+        plan=ec2_source,
+        security=checkov_text,
+        cost=infracost_text,
+    )
+
+
+# ============================================================================
+# GEMINI CALL
+# ============================================================================
+
+def ask_gemini(prompt, api_key):
+    print("\n> Querying Gemini ...\n")
+    client = genai.Client(api_key=api_key)
+    for model_name in MODELS:
+        print(f"  Trying {model_name} ... ", end="", flush=True)
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={"temperature": 0.1, "max_output_tokens": 1500},
+            )
+            text = response.text.strip()
+            if text:
+                print("OK")
+                return text
+            print("empty response")
+        except Exception as e:
+            print(f"failed -- {str(e)[:100]}")
+    print("\nAll models failed.")
+    return "Gemini analysis failed -- check API key and model availability."
+
+
+# ============================================================================
+# INLINE COMMENTS  — only the two issues in ec2.tf
+# ============================================================================
+
+# Exactly two targeted rules for ec2.tf only.
+# Each entry: (file_glob, line_regex, severity, check_id, title, fix)
+EC2_INLINE_RULES = [
+    (
+        "ec2.tf",
+        r'monitoring\s*=\s*false',
+        "HIGH",
+        "CKV_AWS_126",
+        "Detailed CloudWatch monitoring is disabled",
+        (
+            "Change monitoring = false to monitoring = true.\n\n"
+            "Without detailed monitoring, CloudWatch only collects metrics every 5 minutes "
+            "instead of every 1 minute, making it impossible to detect short-lived CPU spikes "
+            "or respond quickly to incidents.\n\n"
+            "Fix:\n```hcl\nmonitoring = true\n```"
+        ),
+    ),
+    (
+        "ec2.tf",
+        r'instance_type\s*=\s*var\.ec2_instance_type',
+        "COST",
+        "COST_EC2_OVERSIZE",
+        "EC2 instance type m5.2xlarge is oversized",
+        (
+            "Default ec2_instance_type is m5.2xlarge (~$277/mo). "
+            "Downsize to m5.large (~$70/mo) or t3.large (~$60/mo) after load testing.\n\n"
+            "Fix in terraform/variables.tf:\n"
+            "```hcl\nvariable \"ec2_instance_type\" {\n"
+            "  default = \"m5.large\"\n}\n```\n\n"
+            "Or override in terraform.tfvars:\n"
+            "```hcl\nec2_instance_type = \"m5.large\"\n```"
+        ),
+    ),
+]
+
+
+def build_inline_comments(tf_sources_raw):
+    """
+    Produce { path, line, body } dicts for GitHub's pulls.createReviewComment API.
+    Only targets the two known issues in terraform/modules/ec2.tf.
+    """
+    comments = []
+    seen = set()
+
+    for search_dir in ["terraform", "."]:
+        base = Path(search_dir)
+        if not base.is_dir():
+            continue
+        tf_files = sorted(base.rglob("*.tf"))
+        if not tf_files:
+            continue
+
+        for tf_path in tf_files:
+            filename = tf_path.name  # e.g. "ec2.tf"
+            try:
+                rel_path   = str(tf_path).lstrip("./")
+                file_lines = tf_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except Exception:
+                continue
+
+            for file_glob, line_regex, severity, check_id, title, fix in EC2_INLINE_RULES:
+                if filename != file_glob:
+                    continue
+                for lineno, raw_line in enumerate(file_lines, start=1):
+                    stripped = raw_line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if re.search(line_regex, stripped, re.IGNORECASE):
+                        dedup_key = (rel_path, lineno, check_id)
+                        if dedup_key in seen:
+                            continue
+                        seen.add(dedup_key)
+
+                        body = (
+                            f"[{severity}] {check_id} — {title}\n\n"
+                            f"File: {rel_path}, line {lineno}\n\n"
+                            f"{fix}"
+                        )
+                        comments.append({"path": rel_path, "line": lineno, "body": body})
+        break  # stop after first directory that has .tf files
+
+    return comments
+
+
+def save_inline_comments(comments, output_dir="."):
+    path = f"{output_dir}/inline-comments.json"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(comments, f, indent=2)
+        print(f"  Saved: {path}  ({len(comments)} inline comments)")
+    except Exception as e:
+        print(f"  Could not save inline-comments.json: {e}")
+
+
+# ============================================================================
+# REPORT SAVE
+# ============================================================================
+
+def save_report(report, output_dir="."):
+    md_path = f"{output_dir}/infrastructure-analysis-report.md"
+    try:
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(report)
+            f.write(
+                f"\n\n---\n*Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                " -- Checkov + Infracost + Gemini*\n"
+            )
+        print(f"\n  Saved: {md_path}")
+    except Exception as e:
+        print(f"\n  Could not save markdown: {e}")
+
+    json_path = f"{output_dir}/infrastructure-analysis-report.json"
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump({"timestamp": datetime.now().isoformat(), "report": report}, f, indent=2)
+        print(f"  Saved: {json_path}")
+    except Exception as e:
+        print(f"  Could not save JSON: {e}")
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main():
+    api_key = get_gemini_key()
+
+    for required in ["checkov-output.json", "infracost-output.json"]:
+        if not os.path.exists(required):
+            print(f"Error: {required} not found.")
+            print("Run Checkov and Infracost before calling this script.")
+            sys.exit(1)
+
+    print("> Loading checkov-output.json ...")
+    checkov_data = load_json_file("checkov-output.json")
+
+    print("> Loading infracost-output.json ...")
+    infracost_data = load_json_file("infracost-output.json")
+
+    print("> Loading Terraform source files ...")
+    tf_sources = load_terraform_sources()
+
+    if not checkov_data:
+        print("Error: Failed to parse checkov-output.json")
+        sys.exit(1)
+    if not infracost_data:
+        print("Error: Failed to parse infracost-output.json")
+        sys.exit(1)
+
+    checkov_text   = extract_checkov_text(checkov_data)
+    infracost_text = extract_infracost_text(infracost_data)
+
+    prompt = build_prompt(tf_sources, checkov_text, infracost_text)
+    report = ask_gemini(prompt, api_key)
+
+    print("\n> Saving report ...")
+    save_report(report)
+
+    print("\n> Building inline comments ...")
+    inline_comments = build_inline_comments(tf_sources)
+    save_inline_comments(inline_comments)
+
+    print("\nDone.")
+    print("  infrastructure-analysis-report.md  <- PR summary comment (2 sections only)")
+    print("  infrastructure-analysis-report.json <- artifact")
+    print("  inline-comments.json               <- Files Changed tab annotations")
+
+
+if __name__ == "__main__":
+    main()

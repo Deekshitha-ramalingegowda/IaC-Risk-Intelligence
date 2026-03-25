@@ -1,24 +1,14 @@
 provider "aws" {
-  region = var.region
+  region = "us-east-1"
 }
 
-module "vpc" {
-  source = "./modules/vpc"
+resource "aws_instance" "main" {
+  ami           = "ami-0c55b159cbfafe1f0"
+  instance_type = "m5.2xlarge"
 
-  project_name = var.project_name
-  vpc_cidr     = var.vpc_cidr
-  subnet_cidr  = var.subnet_cidr
-  az           = var.az
-}
+  monitoring = false
 
-module "ec2" {
-  source = "./modules/ec2"
-
-  project_name  = var.project_name
-  vpc_id        = module.vpc.vpc_id
-  subnet_id     = module.vpc.subnet_id
-  ami_id        = var.ami_id
-  instance_type = var.instance_type
-  key_name      = var.key_name
-  allowed_ip    = var.allowed_ip
+  tags = {
+    Name = "main-instance"
+  }
 }
