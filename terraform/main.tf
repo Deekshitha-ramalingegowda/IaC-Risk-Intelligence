@@ -1,37 +1,36 @@
+terraform {
+  required_version = ">= 1.3.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
 provider "aws" {
   region = var.aws_region
 }
 
-module "infra" {
-  source = "./modules"
+module "vpc" {
+  source = "./modules/vpc"
 
-  # shared
-  tags = {
-    Environment = var.environment
-    Project     = var.project_name
-    ManagedBy   = "terraform"
-  }
-
-  # ec2
-  ami               = var.ami
-  ec2_instance_type = var.ec2_instance_type
-  ec2_volume_size   = var.ec2_volume_size
-
-  # s3
-  bucket_name = var.bucket_name
-
-  # vpc
-  vpc_cidr             = var.vpc_cidr
-  private_subnets      = var.private_subnets
-  flow_log_role_arn    = var.flow_log_role_arn
-  flow_log_destination = var.flow_log_destination
-
-  # rds
-  db_engine               = var.db_engine
-  db_engine_version       = var.db_engine_version
-  db_instance_class       = var.db_instance_class
-  db_allocated_storage    = var.db_allocated_storage
-  db_name                 = var.db_name
-  rds_monitoring_role_arn = var.rds_monitoring_role_arn
+  project_name        = var.project_name
+  vpc_cidr            = var.vpc_cidr
+  public_subnet_cidr  = var.public_subnet_cidr
+  private_subnet_cidr = var.private_subnet_cidr
+  availability_zone   = var.availability_zone
+  tags                = var.tags
 }
 
+module "ec2" {
+  source = "./modules/ec2"
+
+  project_name      = var.project_name
+  vpc_id            = module.vpc.vpc_id
+  subnet_id         = module.vpc.private_subnet_id
+  ec2_instance_type = var.ec2_instance_type
+  ami_id            = var.ami_id
+  key_name          = var.key_name
+  tags              = var.tags
+}

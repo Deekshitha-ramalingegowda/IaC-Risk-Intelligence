@@ -1,24 +1,53 @@
-variable "aws_region"   { default = "us-east-1" }
-variable "environment"  { default = "production" }
-variable "project_name" { default = "my-app" }
+variable "aws_region" {
+  type    = string
+  default = "us-east-1"
+}
 
-variable "ami"               { type = string }
-variable "ec2_instance_type" { default = "m5.2xlarge" }
-variable "ec2_volume_size"   { default = 50 }
+variable "project_name" {
+  type    = string
+  default = "demo"
+}
 
-variable "bucket_name" { type = string }
+variable "vpc_cidr" {
+  type    = string
+  default = "10.0.0.0/16"
+}
 
-variable "vpc_cidr"             { default = "10.0.0.0/16" }
-variable "private_subnets"      { type = map(string) }
-variable "flow_log_role_arn"    { type = string }
-variable "flow_log_destination" { type = string }
+variable "public_subnet_cidr" {
+  type    = string
+  default = "10.0.1.0/24"
+}
 
-variable "db_engine"              { default = "mysql" }
-variable "db_engine_version"      { default = "8.0" }
-variable "db_instance_class"      { default = "db.t3.medium" }
-variable "db_allocated_storage"   { default = 50 }
-variable "db_name"                { type = string }
-variable "rds_monitoring_role_arn" { type = string }
+variable "private_subnet_cidr" {
+  type    = string
+  default = "10.0.2.0/24"
+}
 
+variable "availability_zone" {
+  type    = string
+  default = "us-east-1a"
+}
 
+# COST ALERT: m5.2xlarge ~$277/mo. Use m5.large (~$70) for non-prod.
+variable "ec2_instance_type" {
+  type    = string
+  default = "m5.2xlarge"
+}
 
+variable "ami_id" {
+  type    = string
+  default = "ami-0c02fb55956c7d316"  # Amazon Linux 2 us-east-1
+}
+
+variable "key_name" {
+  type    = string
+  default = ""
+}
+
+variable "tags" {
+  type = map(string)
+  default = {
+    Environment = "dev"
+    ManagedBy   = "terraform"
+  }
+}
