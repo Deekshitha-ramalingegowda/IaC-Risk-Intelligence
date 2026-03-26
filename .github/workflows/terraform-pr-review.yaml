@@ -5,7 +5,7 @@ on:
     paths:
       - 'terraform/**'
       - '.github/workflows/terraform-pr-review.yaml'
-  workflow_dispatch:
+  
 
 jobs:
   infrastructure-analysis:
