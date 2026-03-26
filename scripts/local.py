@@ -71,7 +71,7 @@ def get_gemini_key():
 
 
 # ============================================================================
-# DATA EXTRACTION  (Checkov + Infracost -> plain text for prompt)
+# DATA EXTRACTION
 # ============================================================================
 
 def extract_checkov_text(checkov_data):
@@ -88,15 +88,11 @@ def extract_checkov_text(checkov_data):
         resource   = check.get("resource", "")
         file_path  = check.get("file_path", "")
         line_range = check.get("file_line_range", [])
-        code_block = check.get("code_block", [])
         loc = file_path
         if len(line_range) == 2:
             loc += f":{line_range[0]}-{line_range[1]}"
         lines.append(f"[{check_id}] {resource}  ({loc})")
         lines.append(f"  Rule: {check_name}")
-        if code_block:
-            snippet = "\n".join(f"  {ln}: {code.rstrip()}" for ln, code in code_block[:10])
-            lines.append(f"  Code:\n{snippet}")
         lines.append("")
     return "\n".join(lines)
 
@@ -106,30 +102,6 @@ def _safe_float(value):
         return float(value or 0)
     except (ValueError, TypeError):
         return 0.0
-
-
-def _extract_resource_cost(resource):
-    monthly = _safe_float(resource.get("monthlyCost"))
-    components = []
-    for cost in resource.get("costComponents", []):
-        c = _safe_float(cost.get("monthlyCost"))
-        if c == 0:
-            c = _safe_float(cost.get("hourlyCost")) * 730
-        monthly += c
-        desc = cost.get("description", "")
-        qty  = cost.get("monthlyQuantity") or cost.get("quantity") or ""
-        unit = cost.get("unit", "")
-        if desc:
-            components.append(f"    * {desc}: {qty} {unit} = ${c:.2f}/mo")
-    for sub in resource.get("subresources", []):
-        sub_monthly = _safe_float(sub.get("monthlyCost"))
-        for cost in sub.get("costComponents", []):
-            sc = _safe_float(cost.get("monthlyCost"))
-            if sc == 0:
-                sc = _safe_float(cost.get("hourlyCost")) * 730
-            sub_monthly += sc
-        monthly += sub_monthly
-    return monthly, components
 
 
 def extract_infracost_text(infracost_data):
@@ -149,7 +121,7 @@ def extract_infracost_text(infracost_data):
             for resource in resources:
                 name  = resource.get("name", "unknown")
                 rtype = resource.get("resourceType", "")
-                monthly, components = _extract_resource_cost(resource)
+                monthly = _safe_float(resource.get("monthlyCost"))
                 if monthly == 0:
                     monthly = _safe_float(resource.get("hourlyCost")) * 730
                 resource_costs.append((monthly, name, rtype, components, proj_name, section_key))
@@ -176,15 +148,7 @@ def extract_infracost_text(infracost_data):
         label    = f"{name} ({rtype})" if rtype else name
         cost_str = f"${monthly:.2f}/mo" if monthly > 0 else "$0.00/mo (unpriced)"
         lines.append(f"{label}: {cost_str}")
-        lines.extend(components[:4])
-        lines.append("")
     return "\n".join(lines)
-
-
-def extract_terraform_plan_text(tf_sources):
-    if not tf_sources:
-        return "No Terraform source available."
-    return tf_sources[:12000]
 
 
 # ============================================================================
@@ -219,7 +183,7 @@ Organize output under these sections:
 
 Use this exact format for every issue:
 
----
+Output EXACTLY two sections, nothing else — no introduction, no conclusion, no markdown headers outside what is shown.
 
 **Finding:** <title>
 **Risk:** <what can go wrong>
@@ -244,14 +208,6 @@ Rules:
 - Keep each field to 1-2 sentences maximum.
 - If a section has no issues write: *(none)*
 
-=====================================
-TERRAFORM PLAN
-=====================================
-{plan}
-
-=====================================
-CHECKOV RESULTS
-=====================================
 {security}
 
 =====================================
@@ -267,8 +223,20 @@ if the resource is clearly billable.
 
 
 def build_prompt(plan_text, checkov_text, infracost_text):
+    # Only feed the modules/ec2.tf source to keep tokens minimal
+    ec2_lines = []
+    in_ec2 = False
+    for line in plan_text.splitlines():
+        if "modules/ec2.tf" in line or "modules\\ec2.tf" in line:
+            in_ec2 = True
+        elif line.startswith("# -- ") and in_ec2:
+            in_ec2 = False
+        if in_ec2:
+            ec2_lines.append(line)
+    ec2_source = "\n".join(ec2_lines) if ec2_lines else plan_text[:4000]
+
     return ANALYSIS_PROMPT.format(
-        plan=plan_text,
+        plan=ec2_source,
         security=checkov_text,
         cost=infracost_text,
     )
@@ -287,7 +255,7 @@ def ask_gemini(prompt, api_key):
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
-                config={"temperature": 0.1, "max_output_tokens": 8000},
+                config={"temperature": 0.1, "max_output_tokens": 1500},
             )
             text = response.text.strip()
             if text:
@@ -301,7 +269,7 @@ def ask_gemini(prompt, api_key):
 
 
 # ============================================================================
-# INLINE COMMENTS  (GitHub "Files changed" tab)
+# INLINE COMMENTS  — only the two issues in ec2.tf
 # ============================================================================
 
 # Fix hints for every known Checkov check ID.
@@ -487,8 +455,9 @@ def build_inline_comments(checkov_data, tf_sources_raw):
             continue
 
         for tf_path in tf_files:
+            filename = tf_path.name  # e.g. "ec2.tf"
             try:
-                rel_path   = str(tf_path).lstrip("/").lstrip("./")
+                rel_path   = str(tf_path).lstrip("./")
                 file_lines = tf_path.read_text(encoding="utf-8", errors="replace").splitlines()
             except Exception:
                 continue
@@ -497,9 +466,12 @@ def build_inline_comments(checkov_data, tf_sources_raw):
                 stripped = raw_line.strip()
                 if stripped.startswith("#"):  # skip comment-only lines
                     continue
-                for pattern, category, hint in COST_PATTERNS:
-                    if re.search(pattern, stripped, re.IGNORECASE):
-                        dedup_key = (rel_path, lineno, pattern)
+                for lineno, raw_line in enumerate(file_lines, start=1):
+                    stripped = raw_line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if re.search(line_regex, stripped, re.IGNORECASE):
+                        dedup_key = (rel_path, lineno, check_id)
                         if dedup_key in seen:
                             continue
                         seen.add(dedup_key)
@@ -596,25 +568,23 @@ def main():
         print("Error: Failed to parse infracost-output.json")
         sys.exit(1)
 
-    plan_text      = extract_terraform_plan_text(tf_sources)
     checkov_text   = extract_checkov_text(checkov_data)
     infracost_text = extract_infracost_text(infracost_data)
 
-    prompt = build_prompt(plan_text, checkov_text, infracost_text)
+    prompt = build_prompt(tf_sources, checkov_text, infracost_text)
     report = ask_gemini(prompt, api_key)
 
     print("\n> Saving reports ...")
     save_report(report)
 
     print("\n> Building inline comments ...")
-    inline_comments = build_inline_comments(checkov_data, tf_sources)
+    inline_comments = build_inline_comments(tf_sources)
     save_inline_comments(inline_comments)
 
     print("\nDone.")
-    print("  infrastructure-analysis-report.md   <- PR summary comment")
+    print("  infrastructure-analysis-report.md  <- PR summary comment (2 sections only)")
     print("  infrastructure-analysis-report.json <- artifact")
-    print("  infrastructure-analysis-summary.txt <- notification snippet")
-    print("  inline-comments.json                <- Files changed tab comments")
+    print("  inline-comments.json               <- Files Changed tab annotations")
 
 
 if __name__ == "__main__":
