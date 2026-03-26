@@ -35,11 +35,27 @@ REPORT_MD          = "infrastructure-analysis-report.md"   # must match workflow
 REPORT_JSON        = "infrastructure-analysis-report.json"
 REPORT_SUMMARY_TXT = "infrastructure-analysis-summary.txt"
 
+<<<<<<< Updated upstream
 MODELS = [
     "models/gemini-2.5-flash",
     "models/gemini-2.0-flash",
     "models/gemini-2.5-pro",
 ]
+=======
+# ----------------------------
+# EXTRACT DATA (TOKEN OPTIMIZED)
+# ----------------------------
+def extract_tfsec_issues(data):
+    issues = []
+    for r in data.get("results", {}).get("failed_checks", [])[:10]:  # limit
+        issues.append({
+            "rule": r.get("rule_id"),
+            "desc": r.get("description"),
+            "severity": r.get("severity"),
+            "resource": r.get("resource")
+        })
+    return issues
+>>>>>>> Stashed changes
 
 # ============================================================
 # UTILITY FUNCTIONS
