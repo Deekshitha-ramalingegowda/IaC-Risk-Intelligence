@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
- 
+
 import os
 import sys
 import json
 import re
 from pathlib import Path
 from datetime import datetime
- 
+
 try:
     from google import genai
 except ImportError:
     print("google-genai is not installed. Run: pip install google-genai")
     sys.exit(1)
- 
- 
+
+
 MODELS = [
     "models/gemini-2.5-flash",
     "models/gemini-2.0-flash",
     "models/gemini-2.5-pro",
 ]
- 
- 
+
+
 # ============================================================================
 # FILE LOADING
 # ============================================================================
- 
+
 def load_json_file(filename):
     for encoding in ["utf-8-sig", "utf-16", "utf-16-le", "utf-8", "latin-1"]:
         try:
@@ -34,8 +34,8 @@ def load_json_file(filename):
             continue
     print(f"Error: Could not parse {filename}")
     return None
- 
- 
+
+
 def load_terraform_sources(terraform_dir="terraform"):
     for search_dir in [terraform_dir, "."]:
         base = Path(search_dir)
@@ -58,8 +58,8 @@ def load_terraform_sources(terraform_dir="terraform"):
         if parts:
             return "\n".join(parts)
     return ""
- 
- 
+
+
 def get_gemini_key():
     key = os.getenv("GEMINI_API_KEY")
     if not key:
@@ -68,12 +68,12 @@ def get_gemini_key():
         print("  Then run: export GEMINI_API_KEY=AIzaSy...")
         sys.exit(1)
     return key
- 
- 
+
+
 # ============================================================================
 # DATA EXTRACTION  (Checkov + Infracost -> plain text for prompt)
 # ============================================================================
- 
+
 def extract_checkov_text(checkov_data):
     if not checkov_data:
         return "No Checkov data available."
@@ -99,15 +99,15 @@ def extract_checkov_text(checkov_data):
             lines.append(f"  Code:\n{snippet}")
         lines.append("")
     return "\n".join(lines)
- 
- 
+
+
 def _safe_float(value):
     try:
         return float(value or 0)
     except (ValueError, TypeError):
         return 0.0
- 
- 
+
+
 def _extract_resource_cost(resource):
     monthly = _safe_float(resource.get("monthlyCost"))
     components = []
@@ -130,8 +130,8 @@ def _extract_resource_cost(resource):
             sub_monthly += sc
         monthly += sub_monthly
     return monthly, components
- 
- 
+
+
 def extract_infracost_text(infracost_data):
     if not infracost_data:
         return "No Infracost data available."
@@ -179,28 +179,28 @@ def extract_infracost_text(infracost_data):
         lines.extend(components[:4])
         lines.append("")
     return "\n".join(lines)
- 
- 
+
+
 def extract_terraform_plan_text(tf_sources):
     if not tf_sources:
         return "No Terraform source available."
     return tf_sources[:12000]
- 
- 
+
+
 # ============================================================================
 # GEMINI PROMPT
 # ============================================================================
- 
+
 ANALYSIS_PROMPT = """\
 You are a senior cloud architect reviewing a Terraform pull request.
- 
+
 Inputs:
 1. Terraform plan
 2. Checkov security scan results
 3. Infracost cost difference report
- 
+
 Your job is to analyze the infrastructure changes.
- 
+
 For each issue provide:
 - Finding
 - Risk
@@ -209,18 +209,18 @@ For each issue provide:
 - Solution
 - Steps to Fix
 - Terraform Fix Example
- 
+
 Organize output under these sections:
 - Infrastructure Changes
 - Security Issues
 - Cost Impact
 - Reliability Concerns
 - Architecture Anti-Patterns
- 
+
 Use this exact format for every issue:
- 
+
 ---
- 
+
 **Finding:** <title>
 **Risk:** <what can go wrong>
 **Cost Impact:** <dollar amount or "None">
@@ -234,50 +234,50 @@ Use this exact format for every issue:
 ```hcl
 <corrected resource block - only the changed attributes>
 ```
- 
+
 ---
- 
+
 Rules:
 - Output ONLY the five section headers and the issue blocks under them.
 - No introductions, no conclusions, no summaries outside the blocks.
 - Reference the exact resource name and file:line from the inputs for every finding.
 - Keep each field to 1-2 sentences maximum.
 - If a section has no issues write: *(none)*
- 
+
 =====================================
 TERRAFORM PLAN
 =====================================
 {plan}
- 
+
 =====================================
 CHECKOV RESULTS
 =====================================
 {security}
- 
+
 =====================================
 INFRACOST DIFF
 =====================================
 {cost}
- 
+
 IMPORTANT: If resources show "$0.00 (unpriced)", Infracost could not fetch live prices.
 Use the Terraform source above to estimate costs based on AWS on-demand pricing for
 us-east-1 and mark estimates with "(estimated)". Never write "None" for Cost Impact
 if the resource is clearly billable.
 """
- 
- 
+
+
 def build_prompt(plan_text, checkov_text, infracost_text):
     return ANALYSIS_PROMPT.format(
         plan=plan_text,
         security=checkov_text,
         cost=infracost_text,
     )
- 
- 
+
+
 # ============================================================================
 # GEMINI CALL
 # ============================================================================
- 
+
 def ask_gemini(prompt, api_key):
     print("\n> Querying Gemini ...\n")
     client = genai.Client(api_key=api_key)
@@ -298,12 +298,12 @@ def ask_gemini(prompt, api_key):
             print(f"failed -- {str(e)[:100]}")
     print("\nAll models failed.")
     return "Gemini analysis failed -- check API key and model availability."
- 
- 
+
+
 # ============================================================================
 # INLINE COMMENTS  (GitHub "Files changed" tab)
 # ============================================================================
- 
+
 # Fix hints for every known Checkov check ID.
 # Format: check_id -> (severity, plain-text fix instruction)
 # No emojis or symbols anywhere.
@@ -363,7 +363,7 @@ CHECKOV_FIX_HINTS = {
     "CKV_AWS_58":   ("HIGH",     "EKS cluster secrets are not encrypted. Add encryption_config with a KMS key ARN."),
     "CKV_AWS_39":   ("MEDIUM",   "EKS API endpoint is publicly accessible. Add: endpoint_public_access = false."),
 }
- 
+
 # Cost patterns: anchored regexes matched against individual .tf lines.
 # Format: (regex, category, plain-text fix instruction)
 COST_PATTERNS = [
@@ -397,8 +397,8 @@ COST_PATTERNS = [
     # EBS not optimized
     (r'ebs_optimized\s*=\s*false',              "COST", "ebs_optimized = false disables dedicated EBS bandwidth. Change to ebs_optimized = true for consistent storage throughput."),
 ]
- 
- 
+
+
 def _get_severity(check_id):
     """Return plain-text severity for any Checkov check ID."""
     if check_id in CHECKOV_FIX_HINTS:
@@ -406,8 +406,8 @@ def _get_severity(check_id):
     if check_id.startswith("CKV2_"):
         return "MEDIUM"
     return "HIGH"
- 
- 
+
+
 def _get_fix(check_id, check_name, resource):
     """Return a fix instruction for any Checkov check ID, with a structured fallback."""
     if check_id in CHECKOV_FIX_HINTS:
@@ -416,12 +416,12 @@ def _get_fix(check_id, check_name, resource):
         f"Checkov rule '{check_name}' failed on '{resource}'. "
         f"Review the attribute flagged by {check_id} and apply the recommended configuration."
     )
- 
- 
+
+
 def build_inline_comments(checkov_data, tf_sources_raw):
     """
     Build { path, line, body } dicts for GitHub's pulls.createReviewComment API.
- 
+
     Security: one comment per Checkov failed_check, pinned to the exact
               failing line Checkov reported. Every check ID is handled -
               known ones get a specific fix hint, unknown ones get a
@@ -432,10 +432,10 @@ def build_inline_comments(checkov_data, tf_sources_raw):
     """
     comments = []
     seen = set()  # (path, line, key) - prevents duplicate comments on same line
- 
+
     # ── 1. Security: one comment per Checkov failed check ────────────────────
     failed = (checkov_data or {}).get("results", {}).get("failed_checks", [])
- 
+
     for check in failed:
         check_id   = check.get("check_id", "")
         file_path  = check.get("file_path", "").lstrip("/").lstrip("./")
@@ -443,22 +443,22 @@ def build_inline_comments(checkov_data, tf_sources_raw):
         check_name = check.get("check_name", "")
         resource   = check.get("resource", "")
         code_block = check.get("code_block", [])  # [[lineno, text], ...]
- 
+
         if not file_path or not line_range:
             continue
- 
+
         # Pin to the last line of the failing block so the comment sits at
         # the closing brace, which is always visible in the diff.
         line = line_range[1] if len(line_range) == 2 else line_range[0]
- 
+
         dedup_key = (file_path, line, check_id)
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
- 
+
         severity = _get_severity(check_id)
         fix      = _get_fix(check_id, check_name, resource)
- 
+
         # Include the offending code snippet that Checkov captured
         snippet_section = ""
         if code_block:
@@ -468,7 +468,7 @@ def build_inline_comments(checkov_data, tf_sources_raw):
                 + "\n".join(snippet_lines)
                 + "\n```"
             )
- 
+
         body = (
             f"[{severity}] {check_id} on {resource}\n\n"
             f"Issue: {check_name}\n\n"
@@ -476,7 +476,7 @@ def build_inline_comments(checkov_data, tf_sources_raw):
             f"{snippet_section}"
         )
         comments.append({"path": file_path, "line": line, "body": body})
- 
+
     # ── 2. Cost: scan every .tf file line by line ─────────────────────────────
     for search_dir in ["terraform", "."]:
         base = Path(search_dir)
@@ -485,14 +485,14 @@ def build_inline_comments(checkov_data, tf_sources_raw):
         tf_files = sorted(base.rglob("*.tf"))
         if not tf_files:
             continue
- 
+
         for tf_path in tf_files:
             try:
                 rel_path   = str(tf_path).lstrip("/").lstrip("./")
                 file_lines = tf_path.read_text(encoding="utf-8", errors="replace").splitlines()
             except Exception:
                 continue
- 
+
             for lineno, raw_line in enumerate(file_lines, start=1):
                 stripped = raw_line.strip()
                 if stripped.startswith("#"):  # skip comment-only lines
@@ -509,12 +509,12 @@ def build_inline_comments(checkov_data, tf_sources_raw):
                             f"Suggestion: {hint}"
                         )
                         comments.append({"path": rel_path, "line": lineno, "body": body})
- 
+
         break  # stop after first directory that contains .tf files
- 
+
     return comments
- 
- 
+
+
 def save_inline_comments(comments, output_dir="."):
     path = f"{output_dir}/inline-comments.json"
     try:
@@ -523,12 +523,12 @@ def save_inline_comments(comments, output_dir="."):
         print(f"  Saved: {path}  ({len(comments)} inline comments)")
     except Exception as e:
         print(f"  Could not save inline-comments.json: {e}")
- 
- 
+
+
 # ============================================================================
 # REPORT SAVE
 # ============================================================================
- 
+
 def save_report(report, output_dir="."):
     md_path = f"{output_dir}/infrastructure-analysis-report.md"
     try:
@@ -541,7 +541,7 @@ def save_report(report, output_dir="."):
         print(f"\n  Saved: {md_path}")
     except Exception as e:
         print(f"\n  Could not save markdown: {e}")
- 
+
     json_path = f"{output_dir}/infrastructure-analysis-report.json"
     try:
         with open(json_path, "w", encoding="utf-8") as f:
@@ -549,7 +549,7 @@ def save_report(report, output_dir="."):
         print(f"  Saved: {json_path}")
     except Exception as e:
         print(f"  Could not save JSON: {e}")
- 
+
     txt_path = f"{output_dir}/infrastructure-analysis-summary.txt"
     try:
         with open(txt_path, "w", encoding="utf-8") as f:
@@ -557,27 +557,27 @@ def save_report(report, output_dir="."):
         print(f"  Saved: {txt_path}")
     except Exception as e:
         print(f"  Could not save summary: {e}")
- 
- 
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
- 
+
 def main():
     api_key = get_gemini_key()
- 
+
     for required in ["checkov-output.json", "infracost-output.json"]:
         if not os.path.exists(required):
             print(f"Error: {required} not found.")
             print("Run Checkov and Infracost before calling this script.")
             sys.exit(1)
- 
+
     print("> Loading checkov-output.json ...")
     checkov_data = load_json_file("checkov-output.json")
- 
+
     print("> Loading infracost-output.json ...")
     infracost_data = load_json_file("infracost-output.json")
- 
+
     if infracost_data:
         projects = infracost_data.get("projects", [])
         print(f"  totalMonthlyCost : {infracost_data.get('totalMonthlyCost', 'missing')}")
@@ -585,37 +585,37 @@ def main():
         for i, p in enumerate(projects[:3]):
             print(f"  project[{i}] breakdown resources: {len(p.get('breakdown', {}).get('resources', []))}")
             print(f"  project[{i}] diff     resources: {len(p.get('diff', {}).get('resources', []))}")
- 
+
     print("> Loading Terraform source files ...")
     tf_sources = load_terraform_sources()
- 
+
     if not checkov_data:
         print("Error: Failed to parse checkov-output.json")
         sys.exit(1)
     if not infracost_data:
         print("Error: Failed to parse infracost-output.json")
         sys.exit(1)
- 
+
     plan_text      = extract_terraform_plan_text(tf_sources)
     checkov_text   = extract_checkov_text(checkov_data)
     infracost_text = extract_infracost_text(infracost_data)
- 
+
     prompt = build_prompt(plan_text, checkov_text, infracost_text)
     report = ask_gemini(prompt, api_key)
- 
+
     print("\n> Saving reports ...")
     save_report(report)
- 
+
     print("\n> Building inline comments ...")
-    inline_comments = build_inline_comments(checkov_data, tf_sources)  # FIX: pass both arguments
+    inline_comments = build_inline_comments(checkov_data, tf_sources)
     save_inline_comments(inline_comments)
- 
+
     print("\nDone.")
     print("  infrastructure-analysis-report.md   <- PR summary comment")
     print("  infrastructure-analysis-report.json <- artifact")
     print("  infrastructure-analysis-summary.txt <- notification snippet")
     print("  inline-comments.json                <- Files changed tab comments")
- 
- 
+
+
 if __name__ == "__main__":
     main()
