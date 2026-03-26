@@ -137,7 +137,7 @@ jobs:
             exit 0
           fi
 
-          python scripts/analyze.py
+          python scripts/local.py
           echo "✓ Deep analysis complete"
         shell: bash
 
