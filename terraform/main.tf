@@ -14,7 +14,7 @@ resource "aws_instance" "app" {
   }
 
   tags = {
-    Name = "app-server"
+    Name = "app-server-10"
   }
 }
 
