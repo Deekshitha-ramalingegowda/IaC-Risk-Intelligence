@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 
+
 import os
 import sys
 import json
-import re
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
 try:
     from google import genai
 except ImportError:
-    print("google-genai is not installed. Run: pip install google-genai")
+    print(" google-genai is not installed.")
+    print("   Run:  pip install google-genai")
     sys.exit(1)
 
 
+CHECKOV_JSON = "checkov-local.json"
 MODELS = [
     "models/gemini-2.5-flash",
     "models/gemini-2.0-flash",
@@ -22,53 +25,58 @@ MODELS = [
 
 
 # ============================================================================
-# FILE LOADING
+# UTILITY FUNCTIONS
 # ============================================================================
 
 def load_json_file(filename):
-    for encoding in ["utf-8-sig", "utf-16", "utf-16-le", "utf-8", "latin-1"]:
+    """Load and validate JSON file - try multiple encodings"""
+    encodings = ['utf-8-sig', 'utf-16', 'utf-16-le', 'utf-8', 'latin-1']
+
+    for encoding in encodings:
         try:
-            with open(filename, "r", encoding=encoding) as f:
+            with open(filename, 'r', encoding=encoding) as f:
                 return json.load(f)
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
-    print(f"Error: Could not parse {filename}")
+
+    print(f"Error: Could not parse {filename} with any encoding")
     return None
 
+def validate_output_files():
+    """Ensure both output files exist before analysis"""
+    required = ['checkov-output.json', 'infracost-output.json']
+    missing = []
+    for file in required:
+        if not os.path.exists(file):
+            missing.append(file)
 
-def load_terraform_sources(terraform_dir="terraform"):
-    for search_dir in [terraform_dir, "."]:
-        base = Path(search_dir)
-        if not base.is_dir():
-            continue
-        tf_files = sorted(base.rglob("*.tf"))
-        if not tf_files:
-            continue
-        parts = []
-        for tf_path in tf_files:
-            try:
-                content = tf_path.read_text(encoding="utf-8", errors="replace")
-                numbered = "\n".join(
-                    f"{i+1:4d}  {line}"
-                    for i, line in enumerate(content.splitlines())
-                )
-                parts.append(f"\n# -- {tf_path} --\n{numbered}")
-            except Exception:
-                pass
-        if parts:
-            return "\n".join(parts)
-    return ""
+    if missing:
+        return False, f"Missing files: {', '.join(missing)}"
+    return True, "All files present"
+
+def get_file_info(filename):
+    """Get file size and line count for logging"""
+    try:
+        size_kb = os.path.getsize(filename) / 1024
+        with open(filename, 'r') as f:
+            lines = len(f.readlines())
+        return size_kb, lines
+    except:
+        return 0, 0
+
 
 
 def get_gemini_key():
     key = os.getenv("GEMINI_API_KEY")
     if not key:
-        print("GEMINI_API_KEY not set.")
-        print("  Get key : https://aistudio.google.com/app/apikey")
-        print("  Then run: export GEMINI_API_KEY=AIzaSy...")
+        print(" GEMINI_API_KEY not set.")
+        print("   > Get key: https://aistudio.google.com/app/apikey")
+        print("   > Then:    export GEMINI_API_KEY=AIzaSy...")
         sys.exit(1)
     return key
 
+def run_checkov():
+    print("\n> Running Checkov (Security Analysis)...\n")
 
 # ============================================================================
 # DATA EXTRACTION
@@ -171,9 +179,7 @@ TERRAFORM SOURCE
 CHECKOV FAILED CHECKS
 {security}
 
-=====================================
 INFRACOST DIFF
-=====================================
 {cost}
 
 IMPORTANT: If resources show "$0.00 (unpriced)", Infracost could not fetch live prices.
@@ -182,6 +188,9 @@ us-east-1 and mark estimates with "(estimated)". Never write "None" for Cost Imp
 if the resource is clearly billable.
 """
 
+1. INFRASTRUCTURE HEALTH SCORECARD:
+   Overall Grade: [A-F with clear reasoning]
+   - What's the most critical issue preventing an A grade?
 
 def build_prompt(plan_text, checkov_text, infracost_text):
     # Only feed the modules/ec2.tf source to keep tokens minimal
@@ -202,16 +211,92 @@ def build_prompt(plan_text, checkov_text, infracost_text):
         cost=infracost_text,
     )
 
+   Cost Efficiency Grade: [A-F]
+   - Is the infrastructure cost appropriate for what it does?
 
-# ============================================================================
-# GEMINI CALL
-# ============================================================================
+   Compliance Status: [GREEN/YELLOW/RED]
+   - Any compliance violations?
 
-def ask_gemini(prompt, api_key):
-    print("\n> Querying Gemini ...\n")
+2. PR MERGE DECISION RECOMMENDATION:
+   ✓ APPROVE - Infrastructure is secure and cost-appropriate
+   ⚠ APPROVE WITH CONDITIONS - Fix these 2-3 items before/after merge:
+      1. [Issue with timeline]
+      2. [Issue with timeline]
+   ✗ REQUEST CHANGES - Block merge until these critical items are fixed:
+      1. [Critical issue with why it blocks]
+      2. [Critical issue]
+
+3. KEY METRICS & BUSINESS IMPACT:
+   Security Risks:
+   - Critical issues: [N] (what they are)
+   - High issues: [N] (what they are)
+   - Total effort to remediate: [X] hours
+   - Timeline: Can be fixed in [X] weeks
+
+   Cost Analysis:
+   - Monthly cost: $XXX (is this high/appropriate?)
+   - Savings potential: $XXX/month ([X]% reduction)
+   - Payback period: [X] weeks to break even on optimization effort
+   - Annual impact: $XXX/year in savings if optimized
+
+4. CRITICAL ITEMS FOR PR MERGE (if any):
+   [For each critical blocker, state exactly why it prevents merge]
+
+   Example:
+   - Open SSH access (port 22 to 0.0.0.0/0): ANY IP can gain shell access
+     Status: CRITICAL BLOCKER - Must be fixed before merge
+     Fix effort: 10 minutes (add restrict_security_group_rule)
+     Recommended action: Request changes, fix, then approve
+
+   - Database with no encryption: Customer data vulnerable to eavesdropping
+     Status: CRITICAL BLOCKER - Must be fixed before merge
+     Fix effort: 2-3 hours (create encrypted snapshot, restore)
+
+5. ITEMS THAT CAN BE FIXED POST-MERGE (optional):
+   [Non-blocking improvements]
+
+   Example:
+   - RDS downsizing from db.r5.2xlarge to db.r5.xlarge
+     Savings: $525.80/month
+     Effort: 8 hours (testing required)
+     Timeline: Can be done in Week 2
+     Risk: 15-30 min downtime for RDS failover
+     Recommendation: Fix after merge during maintenance window
+
+6. 30-DAY IMPLEMENTATION ROADMAP:
+
+   BEFORE MERGE (Address critical blockers):
+   [List items that must be done before merge]
+
+   WEEK 1 AFTER MERGE (Quick wins):
+   - [Delete unused EBS volumes: saves $XX/month, 1 hour effort]
+   - [Fix open SSH access: 10 minutes, zero downtime]
+
+   WEEK 2-3 (Cost optimization):
+   - [RDS downsizing: saves $XXX/month, 8 hours effort, 15-30 min downtime]
+
+   WEEK 4 (Architectural improvements):
+   - [Consider Reserved Instances if workload is stable]
+
+7. PR MERGE DECISION SUMMARY:
+   Should this PR be merged? YES / NO / CONDITIONAL
+
+   If CONDITIONAL, list the specific conditions and timeline.
+
+   If NO, explain which critical issues must be fixed first.
+
+   If YES, what should the team focus on in the next 30 days?
+
+Format as a clear, concise executive report suitable for engineering leadership/team leads to make a merge decision."""
+
+
+def ask_gemini(prompt, api_key, analysis_type="security"):
+    print(f"\n> Querying Gemini for {analysis_type} analysis...\n")
+
     client = genai.Client(api_key=api_key)
+
     for model_name in MODELS:
-        print(f"  Trying {model_name} ... ", end="", flush=True)
+        print(f"  Trying {model_name} ... ", end="")
         try:
             response = client.models.generate_content(
                 model=model_name,
@@ -222,11 +307,13 @@ def ask_gemini(prompt, api_key):
             if text:
                 print("OK")
                 return text
-            print("empty response")
+            else:
+                print("empty response")
         except Exception as e:
-            print(f"failed -- {str(e)[:100]}")
-    print("\nAll models failed.")
-    return "Gemini analysis failed -- check API key and model availability."
+            print(f"failed > {str(e)[:80]}...")
+
+    print(f"\n All models failed for {analysis_type} analysis.")
+    return f"Failed to get {analysis_type} analysis from Gemini."
 
 
 # ============================================================================
@@ -328,55 +415,120 @@ def save_inline_comments(comments, output_dir="."):
 
 
 # ============================================================================
-# REPORT SAVE
+# REPORT GENERATION FUNCTIONS
 # ============================================================================
 
-def save_report(report, output_dir="."):
-    md_path = f"{output_dir}/infrastructure-analysis-report.md"
+def display_comprehensive_report(security_analysis, cost_analysis, executive_summary):
+    """Display comprehensive report with all three analyses"""
+
+    report = []
+    report.append("\n" + "="*100)
+    report.append("  INFRASTRUCTURE ANALYSIS REPORT (Checkov + Infracost + Gemini Deep Analysis)")
+    report.append(f"  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    report.append("="*100)
+
+    # Executive Summary
+    report.append("\n" + "-"*100)
+    report.append("EXECUTIVE SUMMARY")
+    report.append("-"*100 + "\n")
+    report.append(executive_summary)
+
+    # Security Analysis
+    report.append("\n" + "-"*100)
+    report.append("DEEP SECURITY ANALYSIS")
+    report.append("-"*100 + "\n")
+    report.append(security_analysis)
+
+    # Cost Analysis
+    report.append("\n" + "-"*100)
+    report.append("DEEP COST ANALYSIS & OPTIMIZATION")
+    report.append("-"*100 + "\n")
+    report.append(cost_analysis)
+
+    report.append("\n" + "="*100)
+
+    output = "\n".join(report)
+    print(output)
+    return output
+
+def save_report_to_file(security_analysis, cost_analysis, executive_summary, output_dir="."):
+    """Save report to multiple formats for GitHub Actions"""
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Save as Markdown (for PR comments)
+    md_filename = f"{output_dir}/infrastructure-analysis-report.md"
+    md_content = f"""# Infrastructure Analysis Report
+
+**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+## Executive Summary
+
+{executive_summary}
+
+---
+
+## Security Analysis (Deep)
+
+{security_analysis}
+
+---
+
+## Cost Analysis & Optimization (Deep)
+
+{cost_analysis}
+
+---
+
+*Report generated by Infrastructure Analysis Tool (Checkov + Infracost + Gemini)*
+"""
+
     try:
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(report)
-            f.write(
-                f"\n\n---\n*Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                " -- Checkov + Infracost + Gemini*\n"
-            )
-        print(f"\n  Saved: {md_path}")
+        with open(md_filename, 'w', encoding='utf-8') as f:
+            f.write(md_content)
+        print(f"\n✓ Markdown report saved: {md_filename}")
     except Exception as e:
-        print(f"\n  Could not save markdown: {e}")
+        print(f"\n⚠ Failed to save markdown report: {e}")
 
-    json_path = f"{output_dir}/infrastructure-analysis-report.json"
+    # Save as JSON (for artifacts)
+    json_filename = f"{output_dir}/infrastructure-analysis-report.json"
+    json_content = {
+        "timestamp": datetime.now().isoformat(),
+        "analyses": {
+            "executive_summary": executive_summary,
+            "security_analysis": security_analysis,
+            "cost_analysis": cost_analysis
+        }
+    }
+
+
+EXECUTIVE SUMMARY:
+{executive_summary[:500]}...
+
+For full details, see:
+- infrastructure-analysis-report.md (formatted report)
+- infrastructure-analysis-report.json (complete data)
+
+---
+End of Summary
+"""
+
     try:
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump({"timestamp": datetime.now().isoformat(), "report": report}, f, indent=2)
-        print(f"  Saved: {json_path}")
+        with open(txt_filename, 'w', encoding='utf-8') as f:
+            f.write(txt_content)
+        print(f"✓ Text summary saved: {txt_filename}")
     except Exception as e:
-        print(f"  Could not save JSON: {e}")
+        print(f"⚠ Failed to save text summary: {e}")
 
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
-def main():
-    api_key = get_gemini_key()
-
-    for required in ["checkov-output.json", "infracost-output.json"]:
-        if not os.path.exists(required):
-            print(f"Error: {required} not found.")
-            print("Run Checkov and Infracost before calling this script.")
-            sys.exit(1)
-
-    print("> Loading checkov-output.json ...")
-    checkov_data = load_json_file("checkov-output.json")
-
-    print("> Loading infracost-output.json ...")
-    infracost_data = load_json_file("infracost-output.json")
 
     print("> Loading Terraform source files ...")
     tf_sources = load_terraform_sources()
 
-    if not checkov_data:
-        print("Error: Failed to parse checkov-output.json")
+    if not valid:
+        print(f"Error: {msg}")
+        print("\nFirst, run the security and cost analysis:")
+        print("  1. Run Checkov: checkov -d . --framework terraform -o json")
+        print("  2. Run Infracost: infracost breakdown -p . --format json")
         sys.exit(1)
     if not infracost_data:
         print("Error: Failed to parse infracost-output.json")
