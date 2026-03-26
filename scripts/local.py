@@ -418,7 +418,7 @@ def _get_fix(check_id, check_name, resource):
     )
  
  
-def build_inline_comments(checkov_data, tf_sources_raw):
+def build_inline_comments(checkov_data):
     """
     Build { path, line, body } dicts for GitHub's pulls.createReviewComment API.
  
@@ -607,7 +607,7 @@ def main():
     save_report(report)
  
     print("\n> Building inline comments ...")
-    inline_comments = build_inline_comments(checkov_data, tf_sources)
+    inline_comments = build_inline_comments(checkov_data)
     save_inline_comments(inline_comments)
  
     print("\nDone.")
