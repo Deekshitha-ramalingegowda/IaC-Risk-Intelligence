@@ -5,7 +5,6 @@ provider "aws" {
 resource "aws_instance" "app" {
   ami           = "ami-0c55b159cbfafe1f0"
   instance_type = "m5.2xlarge"
-  monitoring    = false
 
   root_block_device {
     volume_type = "gp2"
@@ -17,10 +16,3 @@ resource "aws_instance" "app" {
     Name = "app-server"
   }
 }
-
-
-
-
-
-
-
