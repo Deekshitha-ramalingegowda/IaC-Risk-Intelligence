@@ -607,7 +607,7 @@ def main():
     save_report(report)
  
     print("\n> Building inline comments ...")
-    inline_comments = build_inline_comments(checkov_data, tf_sources)
+    inline_comments = build_inline_comments(checkov_data, tf_sources)  # FIX: pass both arguments
     save_inline_comments(inline_comments)
  
     print("\nDone.")
