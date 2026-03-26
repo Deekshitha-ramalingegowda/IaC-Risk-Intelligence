@@ -142,7 +142,6 @@ def extract_infracost_text(infracost_data):
     lines = [f"Total monthly cost: ${total_monthly:.2f}  (annual: ${total_monthly*12:.2f})\n"]
     resource_costs = []
     for project in infracost_data.get("projects", []):
-        proj_name = project.get("name", "")
         for section_key in ("breakdown", "diff"):
             section   = project.get(section_key, {})
             resources = section.get("resources", []) or project.get("resources", [])
@@ -152,7 +151,7 @@ def extract_infracost_text(infracost_data):
                 monthly, components = _extract_resource_cost(resource)
                 if monthly == 0:
                     monthly = _safe_float(resource.get("hourlyCost")) * 730
-                resource_costs.append((monthly, name, rtype, components, proj_name, section_key))
+                resource_costs.append((monthly, name, rtype, components, section_key))
     seen: dict = {}
     for entry in resource_costs:
         monthly, name, *_ = entry
@@ -161,18 +160,8 @@ def extract_infracost_text(infracost_data):
     resource_costs = sorted(seen.values(), reverse=True)
     if not resource_costs:
         lines.append("No resources found in Infracost output.")
-        lines.append("(Infracost may require INFRACOST_API_KEY or a valid cloud provider config.)")
         return "\n".join(lines)
-    has_costs = any(m > 0 for m, *_ in resource_costs)
-    if not has_costs:
-        lines.append("All resources show $0.00 - Infracost could not price these resources.")
-        lines.append("Possible causes:")
-        lines.append("  1. INFRACOST_API_KEY not set or invalid.")
-        lines.append("  2. Resources use variables Infracost cannot resolve.")
-        lines.append("  3. Resources are free-tier or not yet supported.")
-        lines.append("")
-        lines.append("Resources found (unpriced):")
-    for monthly, name, rtype, components, proj, section in resource_costs[:15]:
+    for monthly, name, rtype, components, section in resource_costs[:15]:
         label    = f"{name} ({rtype})" if rtype else name
         cost_str = f"${monthly:.2f}/mo" if monthly > 0 else "$0.00/mo (unpriced)"
         lines.append(f"{label}: {cost_str}")
@@ -188,81 +177,77 @@ def extract_terraform_plan_text(tf_sources):
 
 
 # ============================================================================
-# GEMINI PROMPT
+# GEMINI PROMPT  — strict format matching required PR comment style
 # ============================================================================
 
 ANALYSIS_PROMPT = """\
-You are a senior cloud architect reviewing a Terraform pull request.
+You are a senior cloud security and cost engineer reviewing a Terraform pull request.
 
-Inputs:
-1. Terraform plan
+You will be given:
+1. Terraform source files with line numbers
 2. Checkov security scan results
-3. Infracost cost difference report
+3. Infracost cost analysis
 
-Your job is to analyze the infrastructure changes.
+Your task: produce a structured review report.
 
-For each issue provide:
-- Finding
-- Risk
-- Cost Impact
-- Root Cause
-- Solution
-- Steps to Fix
-- Terraform Fix Example
+=== OUTPUT FORMAT ===
 
-Organize output under these sections:
-- Infrastructure Changes
-- Security Issues
-- Cost Impact
-- Reliability Concerns
-- Architecture Anti-Patterns
+The report must have exactly five section headers. Under each header, list every
+issue found using EXACTLY the block template below — no deviations.
 
-Use this exact format for every issue:
+Section headers (use these verbatim, with the emoji):
+## 🔒 Security Issues
+## 💰 Cost Impact
+## ⚡ Infrastructure Changes
+## 🔄 Reliability Concerns
+## 🏗️ Architecture Anti-Patterns
+
+Issue block template (repeat this for every finding):
 
 ---
 
-**Finding:** <title>
-**Risk:** <what can go wrong>
-**Cost Impact:** <dollar amount or "None">
-**Root Cause:** <why this exists in the code - include resource name and file:line>
-**Solution:** <what to do>
+**Finding:** <one-line title>
+**Risk:** <one sentence — what can go wrong if not fixed>
+**Cost Impact:** <dollar amount and context, or "None">
+**Root Cause:** <one sentence — include the exact resource name and file:line number>
+**Solution:** <one sentence — what to change>
+
 **Steps to Fix:**
-1. <step>
-2. <step>
-3. <step>
+1. <concrete action>
+2. <concrete action>
+3. <concrete action>
+
 **Terraform Fix Example:**
 ```hcl
-<corrected resource block - only the changed attributes>
+<only the changed resource block or the changed attributes — nothing else>
 ```
 
 ---
 
-Rules:
-- Output ONLY the five section headers and the issue blocks under them.
-- No introductions, no conclusions, no summaries outside the blocks.
-- Reference the exact resource name and file:line from the inputs for every finding.
-- Keep each field to 1-2 sentences maximum.
-- If a section has no issues write: *(none)*
+Rules you must follow:
+- Every field must be present in every block. Never omit a field.
+- Root Cause must always cite the exact resource name and file:line from the inputs.
+- Cost Impact must never say "None" for resources that are clearly billable (EC2, RDS, EBS, NAT GW).
+  If Infracost shows $0 (unpriced), estimate using AWS us-east-1 on-demand pricing and mark "(estimated)".
+- Keep every field to 1-2 sentences. No bullet sub-lists inside a field.
+- The Terraform Fix Example must be a valid hcl code block showing only the corrected attributes.
+- If a section has no issues, write exactly: *(none)*
+- Output ONLY the five section headers and the issue blocks. No introduction, no summary,
+  no preamble, no conclusion outside the blocks.
 
-=====================================
-TERRAFORM PLAN
-=====================================
+=== INPUTS ===
+
+TERRAFORM SOURCE
+----------------
 {plan}
 
-=====================================
 CHECKOV RESULTS
-=====================================
+---------------
 {security}
 
-=====================================
 INFRACOST DIFF
-=====================================
+--------------
 {cost}
-
-IMPORTANT: If resources show "$0.00 (unpriced)", Infracost could not fetch live prices.
-Use the Terraform source above to estimate costs based on AWS on-demand pricing for
-us-east-1 and mark estimates with "(estimated)". Never write "None" for Cost Impact
-if the resource is clearly billable.
 """
 
 
@@ -304,9 +289,6 @@ def ask_gemini(prompt, api_key):
 # INLINE COMMENTS  (GitHub "Files changed" tab)
 # ============================================================================
 
-# Fix hints for every known Checkov check ID.
-# Format: check_id -> (severity, plain-text fix instruction)
-# No emojis or symbols anywhere.
 CHECKOV_FIX_HINTS = {
     # EC2
     "CKV_AWS_8":    ("CRITICAL", "Root block device is not encrypted. Add: encrypted = true inside root_block_device."),
@@ -335,7 +317,7 @@ CHECKOV_FIX_HINTS = {
     "CKV_AWS_162":  ("HIGH",     "RDS IAM authentication is disabled. Add: iam_database_authentication_enabled = true."),
     "CKV_AWS_293":  ("CRITICAL", "RDS backup retention is 0 days - no recovery possible. Change: backup_retention_period = 7."),
     # Security Groups
-    "CKV_AWS_24":   ("CRITICAL", "Security group allows SSH (port 22) from 0.0.0.0/0. Restrict cidr_blocks to your VPN or bastion CIDR, e.g. [\"10.0.0.0/8\"]."),
+    "CKV_AWS_24":   ("CRITICAL", "Security group allows SSH (port 22) from 0.0.0.0/0. Restrict cidr_blocks to your VPN or bastion CIDR."),
     "CKV_AWS_25":   ("CRITICAL", "Security group allows unrestricted ingress on a sensitive port. Replace cidr_blocks = [\"0.0.0.0/0\"] with security_groups referencing your app layer SG."),
     "CKV_AWS_260":  ("CRITICAL", "Security group allows HTTP (port 80) from 0.0.0.0/0. Restrict access or redirect HTTP to HTTPS."),
     "CKV2_AWS_5":   ("HIGH",     "Security group is defined but not attached to any resource. Verify it is in use or remove it."),
@@ -364,43 +346,27 @@ CHECKOV_FIX_HINTS = {
     "CKV_AWS_39":   ("MEDIUM",   "EKS API endpoint is publicly accessible. Add: endpoint_public_access = false."),
 }
 
-# Cost patterns: anchored regexes matched against individual .tf lines.
-# Format: (regex, category, plain-text fix instruction)
 COST_PATTERNS = [
-    # EC2 instance types
-    (r'instance_type\s*=\s*"m5\.2xlarge"',      "COST", "m5.2xlarge costs approx $277/mo. Benchmark workload then consider t3.large (~$60/mo) or m5.large (~$70/mo)."),
+    (r'instance_type\s*=\s*"m5\.2xlarge"',      "COST", "m5.2xlarge costs approx $277/mo. Consider t3.large (~$60/mo) or m5.large (~$70/mo)."),
     (r'instance_type\s*=\s*"m5\.4xlarge"',      "COST", "m5.4xlarge costs approx $553/mo. Consider m5.xlarge (~$138/mo) after load testing."),
-    (r'instance_type\s*=\s*"m5\.8xlarge"',      "COST", "m5.8xlarge costs approx $1,104/mo. Profile CPU and memory usage before keeping this size."),
-    (r'instance_type\s*=\s*"m4\.',              "COST", "m4 family is previous generation. Switching to m5 or m6i gives better performance per dollar."),
     (r'instance_type\s*=\s*"r5\.2xlarge"',      "COST", "r5.2xlarge costs approx $378/mo. Consider r5.large (~$95/mo) unless memory metrics justify the larger size."),
     (r'instance_type\s*=\s*"r5\.4xlarge"',      "COST", "r5.4xlarge costs approx $756/mo. Downsize to r5.xlarge (~$189/mo) after reviewing memory usage."),
-    # RDS instance classes
     (r'instance_class\s*=\s*"db\.r5\.2xlarge"', "COST", "db.r5.2xlarge costs approx $700/mo. Use db.t3.medium (~$60/mo) for dev or db.m5.large (~$140/mo) for light production."),
     (r'instance_class\s*=\s*"db\.r5\.4xlarge"', "COST", "db.r5.4xlarge costs approx $1,400/mo. Confirm memory-intensive workload requirements before keeping this class."),
-    (r'instance_class\s*=\s*"db\.r5\.xlarge"',  "COST", "db.r5.xlarge costs approx $350/mo. Verify this size is needed based on actual query memory usage."),
     (r'instance_class\s*=\s*"db\.m5\.4xlarge"', "COST", "db.m5.4xlarge costs approx $576/mo. Consider db.m5.large (~$144/mo) unless benchmarks require more."),
-    # EBS volume types
     (r'volume_type\s*=\s*"gp2"',               "COST", "gp2 is 20% more expensive than gp3 and has lower baseline IOPS. Change to: volume_type = \"gp3\"."),
     (r'storage_type\s*=\s*"gp2"',              "COST", "RDS gp2 storage is more expensive than gp3. Change to: storage_type = \"gp3\"."),
-    # EBS and RDS storage sizes
     (r'volume_size\s*=\s*[5-9]\d{2}',          "COST", "Volume size is 500 GB or more, costing $50+/mo. Right-size to actual OS or data footprint (typically 20-50 GB for root volumes)."),
     (r'allocated_storage\s*=\s*[5-9]\d{2}',    "COST", "Allocated RDS storage is 500 GB or more (~$57+/mo). Reduce to actual database size plus a 20% buffer."),
     (r'allocated_storage\s*=\s*\d{4,}',        "COST", "Allocated RDS storage is 1,000 GB or more (~$115+/mo). Reduce to actual database size plus a 20% buffer."),
-    # NAT Gateway
-    (r'resource\s+"aws_nat_gateway"',           "COST", "NAT Gateway costs approx $35/mo fixed plus $0.045 per GB processed. Use VPC Endpoints for S3 or DynamoDB traffic to eliminate most of this cost."),
-    # Unattached EBS volumes
-    (r'resource\s+"aws_ebs_volume"',            "COST", "Standalone EBS volumes incur cost even when unattached. Confirm this volume is attached to an instance or remove it."),
-    # RDS multi-AZ off
+    (r'resource\s+"aws_nat_gateway"',           "COST", "NAT Gateway costs approx $35/mo fixed plus $0.045 per GB processed. Use VPC Endpoints for S3 or DynamoDB traffic."),
     (r'multi_az\s*=\s*false',                   "COST", "multi_az = false saves RDS cost but removes automatic failover. Enable for production: multi_az = true."),
-    # Monitoring off
     (r'monitoring\s*=\s*false',                 "COST", "Detailed monitoring is disabled. Change to monitoring = true to get 1-minute CloudWatch metrics needed for right-sizing decisions."),
-    # EBS not optimized
     (r'ebs_optimized\s*=\s*false',              "COST", "ebs_optimized = false disables dedicated EBS bandwidth. Change to ebs_optimized = true for consistent storage throughput."),
 ]
 
 
 def _get_severity(check_id):
-    """Return plain-text severity for any Checkov check ID."""
     if check_id in CHECKOV_FIX_HINTS:
         return CHECKOV_FIX_HINTS[check_id][0]
     if check_id.startswith("CKV2_"):
@@ -409,7 +375,6 @@ def _get_severity(check_id):
 
 
 def _get_fix(check_id, check_name, resource):
-    """Return a fix instruction for any Checkov check ID, with a structured fallback."""
     if check_id in CHECKOV_FIX_HINTS:
         return CHECKOV_FIX_HINTS[check_id][1]
     return (
@@ -421,19 +386,12 @@ def _get_fix(check_id, check_name, resource):
 def build_inline_comments(checkov_data, tf_sources_raw):
     """
     Build { path, line, body } dicts for GitHub's pulls.createReviewComment API.
-
-    Security: one comment per Checkov failed_check, pinned to the exact
-              failing line Checkov reported. Every check ID is handled -
-              known ones get a specific fix hint, unknown ones get a
-              structured fallback from the check name and resource name.
-    Cost:     one comment per matching line in every .tf file, pinned to
-              that exact line number.
-    Plain text only - no emojis or special symbols.
+    Inline comment format matches the structured Finding block style.
     """
     comments = []
-    seen = set()  # (path, line, key) - prevents duplicate comments on same line
+    seen = set()
 
-    # ── 1. Security: one comment per Checkov failed check ────────────────────
+    # Security: one comment per Checkov failed check
     failed = (checkov_data or {}).get("results", {}).get("failed_checks", [])
 
     for check in failed:
@@ -442,13 +400,11 @@ def build_inline_comments(checkov_data, tf_sources_raw):
         line_range = check.get("file_line_range", [])
         check_name = check.get("check_name", "")
         resource   = check.get("resource", "")
-        code_block = check.get("code_block", [])  # [[lineno, text], ...]
+        code_block = check.get("code_block", [])
 
         if not file_path or not line_range:
             continue
 
-        # Pin to the last line of the failing block so the comment sits at
-        # the closing brace, which is always visible in the diff.
         line = line_range[1] if len(line_range) == 2 else line_range[0]
 
         dedup_key = (file_path, line, check_id)
@@ -459,25 +415,35 @@ def build_inline_comments(checkov_data, tf_sources_raw):
         severity = _get_severity(check_id)
         fix      = _get_fix(check_id, check_name, resource)
 
-        # Include the offending code snippet that Checkov captured
-        snippet_section = ""
+        # Build the code snippet
+        snippet_lines = ""
         if code_block:
-            snippet_lines = [f"    {ln}  {code.rstrip()}" for ln, code in code_block[:6]]
-            snippet_section = (
-                "\n\nOffending code:\n```hcl\n"
-                + "\n".join(snippet_lines)
-                + "\n```"
+            snippet_lines = "\n".join(
+                f"{ln}  {code.rstrip()}" for ln, code in code_block[:8]
             )
 
-        body = (
-            f"[{severity}] {check_id} on {resource}\n\n"
-            f"Issue: {check_name}\n\n"
-            f"Fix: {fix}"
-            f"{snippet_section}"
-        )
-        comments.append({"path": file_path, "line": line, "body": body})
+        # Structured inline comment matching the PR comment style
+        body_parts = [
+            f"### [{severity}] {check_id} — {check_name}",
+            "",
+            f"**Resource:** `{resource}`  ",
+            f"**Location:** `{file_path}:{line_range[0]}-{line_range[1] if len(line_range)==2 else line_range[0]}`",
+            "",
+            f"**Fix:** {fix}",
+        ]
 
-    # ── 2. Cost: scan every .tf file line by line ─────────────────────────────
+        if snippet_lines:
+            body_parts += [
+                "",
+                "**Offending code:**",
+                "```hcl",
+                snippet_lines,
+                "```",
+            ]
+
+        comments.append({"path": file_path, "line": line, "body": "\n".join(body_parts)})
+
+    # Cost: scan every .tf file line by line
     for search_dir in ["terraform", "."]:
         base = Path(search_dir)
         if not base.is_dir():
@@ -495,7 +461,7 @@ def build_inline_comments(checkov_data, tf_sources_raw):
 
             for lineno, raw_line in enumerate(file_lines, start=1):
                 stripped = raw_line.strip()
-                if stripped.startswith("#"):  # skip comment-only lines
+                if stripped.startswith("#"):
                     continue
                 for pattern, category, hint in COST_PATTERNS:
                     if re.search(pattern, stripped, re.IGNORECASE):
@@ -503,14 +469,17 @@ def build_inline_comments(checkov_data, tf_sources_raw):
                         if dedup_key in seen:
                             continue
                         seen.add(dedup_key)
-                        body = (
-                            f"[{category}] {rel_path} line {lineno}\n\n"
-                            f"Current: {stripped}\n\n"
-                            f"Suggestion: {hint}"
-                        )
+                        body = "\n".join([
+                            f"### [COST] Optimization opportunity",
+                            "",
+                            f"**Location:** `{rel_path}:{lineno}`  ",
+                            f"**Current:** `{stripped}`",
+                            "",
+                            f"**Suggestion:** {hint}",
+                        ])
                         comments.append({"path": rel_path, "line": lineno, "body": body})
 
-        break  # stop after first directory that contains .tf files
+        break
 
     return comments
 
@@ -529,14 +498,50 @@ def save_inline_comments(comments, output_dir="."):
 # REPORT SAVE
 # ============================================================================
 
-def save_report(report, output_dir="."):
+def build_report_header(checkov_data, infracost_data):
+    """Build a summary banner to prepend to the Gemini report."""
+    failed_count = len((checkov_data or {}).get("results", {}).get("failed_checks", []))
+    passed_count = len((checkov_data or {}).get("results", {}).get("passed_checks", []))
+    total_monthly = _safe_float((infracost_data or {}).get("totalMonthlyCost"))
+
+    severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0}
+    for check in (checkov_data or {}).get("results", {}).get("failed_checks", []):
+        sev = _get_severity(check.get("check_id", ""))
+        if sev in severity_counts:
+            severity_counts[sev] += 1
+
+    lines = [
+        "# 🛡️ Infrastructure Analysis Report",
+        "",
+        "> Auto-generated by Checkov + Infracost + Gemini on every Terraform PR.",
+        "",
+        "## Summary",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| 🔴 Critical issues | {severity_counts['CRITICAL']} |",
+        f"| 🟠 High issues | {severity_counts['HIGH']} |",
+        f"| 🟡 Medium issues | {severity_counts['MEDIUM']} |",
+        f"| ✅ Checks passed | {passed_count} |",
+        f"| 💰 Est. monthly cost | ${total_monthly:.2f} |",
+        "",
+        "---",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def save_report(report, checkov_data=None, infracost_data=None, output_dir="."):
+    header = build_report_header(checkov_data, infracost_data)
+    full_report = header + report
+
     md_path = f"{output_dir}/infrastructure-analysis-report.md"
     try:
         with open(md_path, "w", encoding="utf-8") as f:
-            f.write(report)
+            f.write(full_report)
             f.write(
                 f"\n\n---\n*Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                " -- Checkov + Infracost + Gemini*\n"
+                " — Checkov + Infracost + Gemini*\n"
             )
         print(f"\n  Saved: {md_path}")
     except Exception as e:
@@ -545,7 +550,7 @@ def save_report(report, output_dir="."):
     json_path = f"{output_dir}/infrastructure-analysis-report.json"
     try:
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump({"timestamp": datetime.now().isoformat(), "report": report}, f, indent=2)
+            json.dump({"timestamp": datetime.now().isoformat(), "report": full_report}, f, indent=2)
         print(f"  Saved: {json_path}")
     except Exception as e:
         print(f"  Could not save JSON: {e}")
@@ -553,7 +558,7 @@ def save_report(report, output_dir="."):
     txt_path = f"{output_dir}/infrastructure-analysis-summary.txt"
     try:
         with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(report[:800])
+            f.write(full_report[:800])
         print(f"  Saved: {txt_path}")
     except Exception as e:
         print(f"  Could not save summary: {e}")
@@ -582,9 +587,6 @@ def main():
         projects = infracost_data.get("projects", [])
         print(f"  totalMonthlyCost : {infracost_data.get('totalMonthlyCost', 'missing')}")
         print(f"  projects found   : {len(projects)}")
-        for i, p in enumerate(projects[:3]):
-            print(f"  project[{i}] breakdown resources: {len(p.get('breakdown', {}).get('resources', []))}")
-            print(f"  project[{i}] diff     resources: {len(p.get('diff', {}).get('resources', []))}")
 
     print("> Loading Terraform source files ...")
     tf_sources = load_terraform_sources()
@@ -604,7 +606,7 @@ def main():
     report = ask_gemini(prompt, api_key)
 
     print("\n> Saving reports ...")
-    save_report(report)
+    save_report(report, checkov_data=checkov_data, infracost_data=infracost_data)
 
     print("\n> Building inline comments ...")
     inline_comments = build_inline_comments(checkov_data, tf_sources)
