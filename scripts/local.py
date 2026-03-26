@@ -282,7 +282,7 @@ def main():
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    report_file = f"iac_audit_report_{timestamp}.md"
+    report_file = "infrastructure-analysis-report.md"
 
     with open(report_file, "w", encoding="utf-8") as f:
         f.write("# IaC Risk Intelligence Report\n\n")
