@@ -13,7 +13,6 @@ resource "aws_instance" "app" {
     encrypted   = false
   }
 
-  
 
   tags = {
     Name = "app-server"
