@@ -1,82 +1,79 @@
 #!/usr/bin/env python3
-
+"""
+IaC Risk Intelligence - Infrastructure Analysis Script
+Runs Checkov + Infracost, sends results to Gemini AI,
+posts a structured PR comment AND inline file annotations via GitHub API.
+"""
 
 import os
 import sys
 import json
 import subprocess
+import re
 from pathlib import Path
 from datetime import datetime
 
 try:
     from google import genai
 except ImportError:
-    print(" google-genai is not installed.")
-    print("   Run:  pip install google-genai")
+    print("google-genai not installed. Run: pip install google-genai")
     sys.exit(1)
 
+try:
+    import requests
+except ImportError:
+    print("requests not installed. Run: pip install requests")
+    sys.exit(1)
 
-CHECKOV_JSON = "checkov-local.json"
+# ============================================================
+# CONSTANTS
+# ============================================================
+
+CHECKOV_JSON       = "checkov-output.json"
+INFRACOST_JSON     = "infracost-output.json"
+REPORT_MD          = "infrastructure-analysis-report.md"   # must match workflow expectation
+REPORT_JSON        = "infrastructure-analysis-report.json"
+REPORT_SUMMARY_TXT = "infrastructure-analysis-summary.txt"
+
 MODELS = [
     "models/gemini-2.5-flash",
     "models/gemini-2.0-flash",
     "models/gemini-2.5-pro",
 ]
 
-
-# ============================================================================
+# ============================================================
 # UTILITY FUNCTIONS
-# ============================================================================
+# ============================================================
 
 def load_json_file(filename):
-    """Load and validate JSON file - try multiple encodings"""
-    encodings = ['utf-8-sig', 'utf-16', 'utf-16-le', 'utf-8', 'latin-1']
-
-    for encoding in encodings:
+    encodings = ["utf-8-sig", "utf-16", "utf-8", "latin-1"]
+    for enc in encodings:
         try:
-            with open(filename, 'r', encoding=encoding) as f:
+            with open(filename, "r", encoding=enc) as f:
                 return json.load(f)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except Exception:
             continue
-
-    print(f"Error: Could not parse {filename} with any encoding")
+    print(f"⚠ Failed to parse {filename}")
     return None
 
-def validate_output_files():
-    """Ensure both output files exist before analysis"""
-    required = ['checkov-output.json', 'infracost-output.json']
-    missing = []
-    for file in required:
-        if not os.path.exists(file):
-            missing.append(file)
-
-    if missing:
-        return False, f"Missing files: {', '.join(missing)}"
-    return True, "All files present"
 
 def get_file_info(filename):
-    """Get file size and line count for logging"""
     try:
         size_kb = os.path.getsize(filename) / 1024
-        with open(filename, 'r') as f:
+        with open(filename, "r", encoding="utf-8", errors="ignore") as f:
             lines = len(f.readlines())
-        return size_kb, lines
-    except:
+        return round(size_kb, 2), lines
+    except Exception:
         return 0, 0
-
 
 
 def get_gemini_key():
     key = os.getenv("GEMINI_API_KEY")
     if not key:
-        print(" GEMINI_API_KEY not set.")
-        print("   > Get key: https://aistudio.google.com/app/apikey")
-        print("   > Then:    export GEMINI_API_KEY=AIzaSy...")
+        print("❌ GEMINI_API_KEY not set")
         sys.exit(1)
     return key
 
-def run_checkov():
-    print("\n> Running Checkov (Security Analysis)...\n")
 
 # ============================================================================
 # DATA EXTRACTION
@@ -265,50 +262,65 @@ def build_prompt(plan_text, checkov_text, infracost_text):
 
 6. 30-DAY IMPLEMENTATION ROADMAP:
 
-   BEFORE MERGE (Address critical blockers):
-   [List items that must be done before merge]
+EXECUTIVE_SYSTEM = """
+You are a CTO reviewing an infrastructure pull request.
+Always respond with:
 
-   WEEK 1 AFTER MERGE (Quick wins):
-   - [Delete unused EBS volumes: saves $XX/month, 1 hour effort]
-   - [Fix open SSH access: 10 minutes, zero downtime]
+## ✅ / ❌ Merge Recommendation
+## 📋 Overall Grade
+## 🔐 Security Grade
+## 💰 Cost Grade
+## 🗓️ 30-Day Roadmap (numbered steps)
 
-   WEEK 2-3 (Cost optimization):
-   - [RDS downsizing: saves $XXX/month, 8 hours effort, 15-30 min downtime]
-
-   WEEK 4 (Architectural improvements):
-   - [Consider Reserved Instances if workload is stable]
-
-7. PR MERGE DECISION SUMMARY:
-   Should this PR be merged? YES / NO / CONDITIONAL
-
-   If CONDITIONAL, list the specific conditions and timeline.
-
-   If NO, explain which critical issues must be fixed first.
-
-   If YES, what should the team focus on in the next 30 days?
-
-Format as a clear, concise executive report suitable for engineering leadership/team leads to make a merge decision."""
+Be direct. Start with the merge decision.
+"""
 
 
-def ask_gemini(prompt, api_key, analysis_type="security"):
-    print(f"\n> Querying Gemini for {analysis_type} analysis...\n")
+def build_security_prompt(checkov_data):
+    failed = checkov_data.get("results", {}).get("failed_checks", [])
+    summary = f"Total failed checks: {len(failed)}\n\n"
+    for check in failed[:30]:
+        summary += (
+            f"- **{check.get('check_id')}** | "
+            f"`{check.get('resource')}` | "
+            f"{check.get('check_name')} | "
+            f"File: `{check.get('repo_file_path', 'unknown')}` "
+            f"Line: {check.get('file_line_range', ['?', '?'])[0]}\n"
+        )
+    return f"Analyze these Terraform security findings:\n\n{summary}"
 
+
+def build_cost_prompt(infracost_data):
+    if not infracost_data:
+        return "No cost data available. Note that NAT Gateways cost ~$36/month and VPC endpoints are a cheaper alternative."
+    total = float(infracost_data.get("totalMonthlyCost", 0))
+    projects = json.dumps(infracost_data.get("projects", [])[:3], indent=2)
+    return f"Monthly Cost: ${total}\n\nProject breakdown:\n{projects}"
+
+
+def build_executive_prompt(sec, cost):
+    return f"SECURITY ANALYSIS:\n{sec}\n\nCOST ANALYSIS:\n{cost}"
+
+
+# ============================================================
+# GEMINI CALL
+# ============================================================
+
+def ask_gemini(system_prompt, user_prompt, api_key, name):
+    print(f"\n🧠 Gemini Analysis → {name}")
     client = genai.Client(api_key=api_key)
-
-    for model_name in MODELS:
-        print(f"  Trying {model_name} ... ", end="")
+    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+    for model in MODELS:
         try:
+            print(f"  Trying {model}...")
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
                 config={"temperature": 0.1, "max_output_tokens": 1500},
             )
-            text = response.text.strip()
-            if text:
-                print("OK")
-                return text
-            else:
-                print("empty response")
+            if response.text:
+                print(f"  ✓ Success with {model}")
+                return response.text.strip()
         except Exception as e:
             print(f"failed > {str(e)[:80]}...")
 
@@ -413,113 +425,190 @@ def save_inline_comments(comments, output_dir="."):
     except Exception as e:
         print(f"  Could not save inline-comments.json: {e}")
 
+    comments = []
+    for check in failed_checks:
+        repo_path  = check.get("repo_file_path", "").lstrip("/")
+        line_range = check.get("file_line_range", [1, 1])
+        start_line = line_range[0] if line_range else 1
+        check_id   = check.get("check_id", "")
+        check_name = check.get("check_name", "")
+        resource   = check.get("resource", "")
+        guideline  = check.get("guideline", "")
 
-# ============================================================================
-# REPORT GENERATION FUNCTIONS
-# ============================================================================
+        # Normalise path — checkov sometimes prefixes with terraform/
+        candidate_paths = [
+            repo_path,
+            f"terraform/{Path(repo_path).name}",
+            Path(repo_path).name,
+        ]
+        patch      = ""
+        final_path = repo_path
+        for p in candidate_paths:
+            if p in patch_map:
+                patch      = patch_map[p]
+                final_path = p
+                break
 
-def display_comprehensive_report(security_analysis, cost_analysis, executive_summary):
-    """Display comprehensive report with all three analyses"""
+        position = patch_line_to_position(patch, start_line)
+        if position is None:
+            # Line not in diff — skip inline comment for this check
+            continue
 
-    report = []
-    report.append("\n" + "="*100)
-    report.append("  INFRASTRUCTURE ANALYSIS REPORT (Checkov + Infracost + Gemini Deep Analysis)")
-    report.append(f"  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    report.append("="*100)
+        body = (
+            f"### 🔐 Security Finding: `{check_id}`\n"
+            f"**Resource:** `{resource}`\n"
+            f"**Issue:** {check_name}\n\n"
+            f"**Risk:** This configuration may expose your infrastructure to unauthorized access or compliance violations.\n\n"
+            f"**Suggested Fix:**\n"
+        )
 
-    # Executive Summary
-    report.append("\n" + "-"*100)
-    report.append("EXECUTIVE SUMMARY")
-    report.append("-"*100 + "\n")
-    report.append(executive_summary)
+        # Attach specific fix hints for common checks
+        if "encrypted" in check_name.lower():
+            body += (
+                "```hcl\n"
+                "root_block_device {\n"
+                "  encrypted = true\n"
+                "}\n"
+                "```\n"
+            )
+        elif "ssh" in check_name.lower() or "0.0.0.0" in check_name.lower():
+            body += (
+                "```hcl\n"
+                "ingress {\n"
+                '  description = "SSH from trusted IP only"\n'
+                "  from_port   = 22\n"
+                "  to_port     = 22\n"
+                '  protocol    = "tcp"\n'
+                '  cidr_blocks = ["203.0.113.0/24"]  # Replace with your VPN/office IP\n'
+                "}\n"
+                "```\n"
+            )
+        elif "monitoring" in check_name.lower():
+            body += (
+                "```hcl\n"
+                "resource \"aws_instance\" \"app\" {\n"
+                "  monitoring = true\n"
+                "}\n"
+                "```\n"
+            )
+        elif "imds" in check_name.lower() or "metadata" in check_name.lower():
+            body += (
+                "```hcl\n"
+                "metadata_options {\n"
+                '  http_tokens = "required"  # Enforce IMDSv2\n'
+                "}\n"
+                "```\n"
+            )
+        else:
+            body += f"Review Checkov guideline: {guideline}\n" if guideline else "Apply the recommended Terraform fix.\n"
 
-    # Security Analysis
-    report.append("\n" + "-"*100)
-    report.append("DEEP SECURITY ANALYSIS")
-    report.append("-"*100 + "\n")
-    report.append(security_analysis)
+        comments.append({
+            "path":     final_path,
+            "position": position,
+            "body":     body,
+        })
 
-    # Cost Analysis
-    report.append("\n" + "-"*100)
-    report.append("DEEP COST ANALYSIS & OPTIMIZATION")
-    report.append("-"*100 + "\n")
-    report.append(cost_analysis)
+    if not comments:
+        print("⚠ No inline comments matched diff positions")
+        return
 
-    report.append("\n" + "="*100)
+    # Create a single PR Review with all inline comments
+    url     = f"https://api.github.com/repos/{gh['repo']}/pulls/{gh['pr_number']}/reviews"
+    headers = {
+        "Authorization": f"Bearer {gh['token']}",
+        "Accept":        "application/vnd.github+json",
+    }
+    payload = {
+        "commit_id": gh["commit_sha"],
+        "body":      "## 🤖 Automated Security Review\nInline annotations from Checkov + Gemini AI analysis. See the PR comment below for the full report.",
+        "event":     "COMMENT",
+        "comments":  comments,
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    if resp.status_code in (200, 201):
+        print(f"✓ Posted {len(comments)} inline review comment(s)")
+    else:
+        print(f"⚠ Inline review failed: {resp.status_code} — {resp.text[:300]}")
 
-    output = "\n".join(report)
-    print(output)
-    return output
 
-def save_report_to_file(security_analysis, cost_analysis, executive_summary, output_dir="."):
-    """Save report to multiple formats for GitHub Actions"""
+# ============================================================
+# PR COMMENT (Summary Report)
+# ============================================================
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+def build_pr_comment(security_analysis, cost_analysis, executive_summary, checkov_data, infracost_data):
+    failed  = checkov_data.get("results", {}).get("failed_checks", [])
+    passed  = checkov_data.get("results", {}).get("passed_checks", [])
+    total_cost = float(infracost_data.get("totalMonthlyCost", 0)) if infracost_data else 0
 
-    # Save as Markdown (for PR comments)
-    md_filename = f"{output_dir}/infrastructure-analysis-report.md"
-    md_content = f"""# Infrastructure Analysis Report
+    # Build per-finding table rows
+    finding_rows = ""
+    for check in failed[:15]:
+        check_id   = check.get("check_id", "")
+        resource   = check.get("resource", "")
+        check_name = check.get("check_name", "")
+        repo_path  = check.get("repo_file_path", "")
+        line_range = check.get("file_line_range", ["-", "-"])
+        start_line = line_range[0] if line_range else "-"
+        finding_rows += f"| `{check_id}` | `{resource}` | {check_name} | `{repo_path}:{start_line}` |\n"
 
-**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    comment = f"""## 🛡️ Infrastructure Analysis & Risk Intelligence Report
 
-## Executive Summary
-
-{executive_summary}
+> Generated by Gemini AI + Checkov + Infracost on {datetime.now().strftime("%Y-%m-%d %H:%M UTC")}
 
 ---
 
-## Security Analysis (Deep)
+## 📊 Summary Dashboard
+
+| Metric | Value |
+|---|---|
+| 🔴 Security Findings | `{len(failed)}` failed checks |
+| ✅ Passed Checks | `{len(passed)}` |
+| 💰 Monthly Cost Estimate | `${total_cost:.2f}` |
+
+---
+
+## 🔐 Security Findings
+
+| Check ID | Resource | Issue | File:Line |
+|---|---|---|---|
+{finding_rows if finding_rows else "| — | — | No findings | — |"}
+
+---
+
+## 🔍 Detailed Security Analysis
 
 {security_analysis}
 
 ---
 
-## Cost Analysis & Optimization (Deep)
+## 💸 Cost Analysis
 
 {cost_analysis}
 
 ---
 
-*Report generated by Infrastructure Analysis Tool (Checkov + Infracost + Gemini)*
-"""
+## 🏢 Executive Summary & Merge Decision
 
-    try:
-        with open(md_filename, 'w', encoding='utf-8') as f:
-            f.write(md_content)
-        print(f"\n✓ Markdown report saved: {md_filename}")
-    except Exception as e:
-        print(f"\n⚠ Failed to save markdown report: {e}")
-
-    # Save as JSON (for artifacts)
-    json_filename = f"{output_dir}/infrastructure-analysis-report.json"
-    json_content = {
-        "timestamp": datetime.now().isoformat(),
-        "analyses": {
-            "executive_summary": executive_summary,
-            "security_analysis": security_analysis,
-            "cost_analysis": cost_analysis
-        }
-    }
+{executive_summary}
 
 
-EXECUTIVE SUMMARY:
-{executive_summary[:500]}...
+All raw reports (`checkov-output.json`, `infracost-output.json`, full markdown report) are available in the **Actions → Artifacts** section of this workflow run.
 
-For full details, see:
-- infrastructure-analysis-report.md (formatted report)
-- infrastructure-analysis-report.json (complete data)
+</details>
 
 ---
-End of Summary
+*🤖 Automated analysis — review all suggestions before applying. Inline code annotations have been added directly to the changed lines above.*
 """
+    return comment
 
-    try:
-        with open(txt_filename, 'w', encoding='utf-8') as f:
-            f.write(txt_content)
-        print(f"✓ Text summary saved: {txt_filename}")
-    except Exception as e:
-        print(f"⚠ Failed to save text summary: {e}")
 
+def post_pr_comment(gh, comment_body):
+    if not gh["token"] or not gh["repo"] or not gh["pr_number"]:
+        print("⚠ GitHub env vars missing — skipping PR comment")
+        return
+    if gh["event_name"] != "pull_request":
+        print("⚠ Not a pull_request event — skipping PR comment")
+        return
 
     print("> Loading Terraform source files ...")
     tf_sources = load_terraform_sources()
