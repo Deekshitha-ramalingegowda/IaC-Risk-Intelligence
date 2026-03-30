@@ -64,30 +64,3 @@ resource "aws_s3_bucket_policy" "logs_policy" {
   })
 }
 
-# ❌ Faulty lifecycle configuration
-resource "aws_s3_bucket_lifecycle_configuration" "logs_lifecycle" {
-  bucket = aws_s3_bucket.logs_bucket.id
-
-  rule {
-    id     = "log-retention"
-    status = "Enabled"
-
-    # ❌ Deletes too early (data loss)
-    expiration {
-      days = 1
-    }
-
-    # ❌ Bad cost transitions
-    transition {
-      days          = 1
-      storage_class = "STANDARD_IA"
-    }
-
-    transition {
-      days          = 2
-      storage_class = "GLACIER"
-    }
-
-    # ❌ No filter → applies to entire bucket
-  }
-}
