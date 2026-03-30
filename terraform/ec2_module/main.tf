@@ -5,8 +5,8 @@ module "ec2_instance" {
   instance_type          = "t3.micro"
   ami_id                 = "ami-0c55b159cbfafe1f0"  # Amazon Linux 2 AMI (change as per your region)
   
-  associate_public_ip    = true
-  enable_monitoring      = true
+  associate_public_ip    = false
+  enable_monitoring      = false
   
   security_group_rules = [
     {
