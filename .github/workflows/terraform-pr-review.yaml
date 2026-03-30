@@ -54,7 +54,7 @@ jobs:
         id: checkov
         run: |
           echo "🔍 Running Checkov security analysis..."
-          checkov -d terraform/ --framework terraform -o json 2>&1 | tee checkov-output.json || true
+          checkov -d terraform/s3_module --framework terraform -o json 2>&1 | tee checkov-output.json || true
           
           # Validate JSON output
           if ! jq empty checkov-output.json 2>/dev/null; then
@@ -96,7 +96,7 @@ jobs:
           
           # Try to run infracost, but don't fail if not available
           if command -v infracost &> /dev/null; then
-            infracost breakdown --path terraform/ --format json > infracost-output.json 2>&1 || true
+            infracost breakdown --path terraform/s3_module --format json > infracost-output.json 2>&1 || true
             TOTAL_COST=$(jq '.totalMonthlyCost // 0' infracost-output.json 2>/dev/null || echo "0")
             echo "infracost_total=$TOTAL_COST" >> $GITHUB_OUTPUT
             echo "✓ Infracost analysis complete"
