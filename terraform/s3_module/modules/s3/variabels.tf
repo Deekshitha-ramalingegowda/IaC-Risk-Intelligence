@@ -53,15 +53,3 @@ variable "lifecycle_rules" {
   }))
   default = []
 }
-
-variable "enable_logging" {
-  description = "Enable S3 access logging"
-  type        = bool
-  default     = false
-}
-
-variable "log_target_bucket" {
-  description = "Target bucket for access logs"
-  type        = string
-  default     = ""
-}

@@ -29,7 +29,7 @@ variable "enable_monitoring" {
 variable "enable_encryption" {
   description = "Enable EBS encryption"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "root_volume_type" {
@@ -41,7 +41,7 @@ variable "root_volume_type" {
 variable "root_volume_size" {
   description = "Size of root volume in GB"
   type        = number
-  default     = 100
+  default     = 20
 }
 
 variable "security_group_rules" {

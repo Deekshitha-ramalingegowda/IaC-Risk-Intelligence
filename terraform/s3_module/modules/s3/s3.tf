@@ -9,8 +9,7 @@ resource "aws_s3_bucket_versioning" "versioning" {
   bucket = aws_s3_bucket.bucket.id
 
   versioning_configuration {
-    status     = var.enable_versioning ? "Enabled" : "Suspended"
-    mfa_delete = var.enable_versioning ? "Disabled" : null
+    status = var.enable_versioning ? "Enabled" : "Suspended"
   }
 }
 
@@ -49,13 +48,7 @@ resource "aws_s3_bucket_policy" "policy" {
   policy = var.policy_json
 }
 
-# Server Access Logging (Cost: Increases requests/storage)
-resource "aws_s3_bucket_logging" "logging" {
-  count         = var.enable_logging ? 1 : 0
-  bucket        = aws_s3_bucket.bucket.id
-  target_bucket = var.log_target_bucket
-  target_prefix = "logs/"
-}
+
 
 # Lifecycle configuration
 resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
