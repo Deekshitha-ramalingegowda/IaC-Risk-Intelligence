@@ -5,6 +5,7 @@ module "s3_public_bucket" {
 
   block_public_access = false
   acl                 = "public-read"
+  enable_versioning   = true
 
   attach_policy = true
   policy_json = jsonencode({
@@ -13,11 +14,14 @@ module "s3_public_bucket" {
       {
         Effect    = "Allow"
         Principal = "*"
-        Action    = "s3:GetObject"
-        Resource  = "arn:aws:s3:::my-public-bucket-12345/*"
+        Action    = ["s3:GetObject", "s3:ListBucket"]
+        Resource  = ["arn:aws:s3:::my-public-bucket-4567", "arn:aws:s3:::my-public-bucket-4567/*"]
       }
     ]
   })
+
+  enable_logging = true
+  log_target_bucket = "my-log-bucket"
 
   tags = {
     Environment = "dev"

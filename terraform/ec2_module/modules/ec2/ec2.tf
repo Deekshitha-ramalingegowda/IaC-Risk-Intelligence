@@ -36,7 +36,10 @@ resource "aws_instance" "ec2" {
   associate_public_ip_address = var.associate_public_ip
   monitoring             = var.enable_monitoring
   vpc_security_group_ids = [aws_security_group.ec2_sg.id]
-  
+  metadata_options {
+    http_endpoint           = "enabled"
+    http_tokens             = "optional"
+  }
   iam_instance_profile   = var.iam_instance_profile != null ? var.iam_instance_profile : null
   
   root_block_device {

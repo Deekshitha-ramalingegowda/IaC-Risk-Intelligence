@@ -4,12 +4,13 @@ resource "aws_s3_bucket" "bucket" {
   tags = var.tags
 }
 
-# Versioning
+# Versioning (Cost Issue: Increases storage)
 resource "aws_s3_bucket_versioning" "versioning" {
   bucket = aws_s3_bucket.bucket.id
 
   versioning_configuration {
-    status = var.enable_versioning ? "Enabled" : "Suspended"
+    status     = var.enable_versioning ? "Enabled" : "Suspended"
+    mfa_delete = var.enable_versioning ? "Disabled" : null
   }
 }
 
@@ -24,7 +25,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "encryption" {
   }
 }
 
-# Public access block (toggle)
+# Public access block (Security Issue: Currently disabled)
 resource "aws_s3_bucket_public_access_block" "public_access" {
   bucket = aws_s3_bucket.bucket.id
 
@@ -46,6 +47,14 @@ resource "aws_s3_bucket_policy" "policy" {
   count  = var.attach_policy ? 1 : 0
   bucket = aws_s3_bucket.bucket.id
   policy = var.policy_json
+}
+
+# Server Access Logging (Cost: Increases requests/storage)
+resource "aws_s3_bucket_logging" "logging" {
+  count         = var.enable_logging ? 1 : 0
+  bucket        = aws_s3_bucket.bucket.id
+  target_bucket = var.log_target_bucket
+  target_prefix = "logs/"
 }
 
 # Lifecycle configuration
