@@ -1,7 +1,7 @@
 module "s3_public_bucket" {
   source = "./modules/s3"
 
-  bucket_name = "my-public-bucket-12345"
+  bucket_name = "my-public-bucket-4567"
 
   block_public_access = false
   acl                 = "public-read"
