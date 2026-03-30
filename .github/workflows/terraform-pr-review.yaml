@@ -11,11 +11,11 @@ jobs:
   infrastructure-analysis:
     name: Security & Cost Analysis
     runs-on: ubuntu-latest
-
+    
     permissions:
       pull-requests: write
       contents: read
-
+      
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -25,9 +25,9 @@ jobs:
       # ====================================================================
       # SETUP TOOLS & DEPENDENCIES
       # ====================================================================
-
+      
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -35,174 +35,162 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # FIX: anthropic SDK is now in requirements.txt — no separate install step needed
           pip install -r scripts/requirements.txt
+          pip install google-genai
 
       - name: Install Checkov
         run: pip install checkov
 
       - name: Install Infracost
         run: |
-          curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
-          # FIX: use 'sh' not 'bash', and verify the binary is on PATH before continuing
-          echo "$HOME/.infracost/bin" >> $GITHUB_PATH
+          curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | bash || true
+          infracost --version || echo "⚠ Infracost installation may have failed - will attempt to run"
 
       # ====================================================================
-      # SECURITY ANALYSIS — CHECKOV
+      # SECURITY ANALYSIS - CHECKOV
       # ====================================================================
-
+      
       - name: Run Checkov Security Analysis
         id: checkov
-        # FIX: continue-on-error: true so a failing scan does not abort the AI step
-        continue-on-error: true
         run: |
-          echo "Running Checkov security analysis..."
-          # Scan both the root terraform directory and any nested modules
-          checkov -d terraform/ --framework terraform -o json --output-file checkov-output.json 2>&1 || true
-
-          # Validate JSON output — create a safe default if Checkov produced no file or invalid JSON
-          if [ ! -f checkov-output.json ] || ! jq empty checkov-output.json 2>/dev/null; then
-            echo "Checkov output is not valid JSON — creating safe default"
+          echo "🔍 Running Checkov security analysis..."
+          checkov -d terraform/ --framework terraform -o json 2>&1 | tee checkov-output.json || true
+          
+          # Validate JSON output
+          if ! jq empty checkov-output.json 2>/dev/null; then
+            echo "⚠ Checkov output is not valid JSON, creating empty report"
             echo '{"results": {"failed_checks": [], "passed_checks": []}}' > checkov-output.json
           fi
-
+          
+          echo "✓ Checkov analysis complete"
+          
+          # Count findings
           FAILED=$(jq '.results.failed_checks | length' checkov-output.json 2>/dev/null || echo "0")
           PASSED=$(jq '.results.passed_checks | length' checkov-output.json 2>/dev/null || echo "0")
           echo "checkov_failed=$FAILED" >> $GITHUB_OUTPUT
           echo "checkov_passed=$PASSED" >> $GITHUB_OUTPUT
-          echo "Checkov: $FAILED failed, $PASSED passed"
         shell: bash
 
-      # ====================================================================
-      # COST ANALYSIS — INFRACOST
-      # ====================================================================
+      - name: Display Checkov Summary
+        run: |
+          echo "📊 Checkov Results:"
+          echo "  Failed checks: ${{ steps.checkov.outputs.checkov_failed }}"
+          echo "  Passed checks: ${{ steps.checkov.outputs.checkov_passed }}"
 
+      # ====================================================================
+      # COST ANALYSIS - INFRACOST
+      # ====================================================================
+      
+      - name: Configure Infracost API Key
+        run: |
+          if [ -z "${{ secrets.INFRACOST_API_KEY }}" ]; then
+            echo "⚠ Warning: INFRACOST_API_KEY not set - cost analysis will be limited"
+          fi
+      
       - name: Run Infracost Cost Analysis
         id: infracost
         env:
           INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
         run: |
-          echo "Running Infracost cost analysis..."
-
+          echo "💰 Running Infracost cost analysis..."
+          
+          # Try to run infracost, but don't fail if not available
           if command -v infracost &> /dev/null; then
             infracost breakdown --path terraform/ --format json > infracost-output.json 2>&1 || true
-
-            # Validate — fall back to empty output if infracost failed
-            if ! jq empty infracost-output.json 2>/dev/null; then
-              echo '{"totalMonthlyCost": 0, "projects": []}' > infracost-output.json
-            fi
-
-            TOTAL_COST=$(jq '.totalMonthlyCost // "0"' infracost-output.json 2>/dev/null || echo "0")
+            TOTAL_COST=$(jq '.totalMonthlyCost // 0' infracost-output.json 2>/dev/null || echo "0")
             echo "infracost_total=$TOTAL_COST" >> $GITHUB_OUTPUT
-            echo "Infracost monthly cost: $TOTAL_COST"
+            echo "✓ Infracost analysis complete"
           else
-            echo "Infracost binary not found — creating empty output"
+            echo "⚠ Infracost not available - creating empty output"
             echo '{"totalMonthlyCost": 0, "projects": []}' > infracost-output.json
             echo "infracost_total=0" >> $GITHUB_OUTPUT
           fi
         shell: bash
 
-      # ====================================================================
-      # VALIDATE FILES BEFORE AI STEP
-      # ====================================================================
+      - name: Display Infracost Summary
+        run: |
+          echo "💸 Infracost Results:"
+          echo "  Total monthly cost: \$${{ steps.infracost.outputs.infracost_total }}"
 
+      # ====================================================================
+      # AI-POWERED DEEP ANALYSIS - GEMINI
+      # ====================================================================
+      
       - name: Validate Analysis Files
         run: |
-          for f in checkov-output.json infracost-output.json; do
-            if [ ! -f "$f" ] || ! jq empty "$f" 2>/dev/null; then
-              echo "Creating safe default for $f"
-              case "$f" in
-                checkov-output.json)
-                  echo '{"results": {"failed_checks": [], "passed_checks": []}}' > "$f" ;;
-                infracost-output.json)
-                  echo '{"totalMonthlyCost": 0, "projects": []}' > "$f" ;;
-              esac
-            fi
-          done
-          echo "All required files validated"
+          echo "✓ Validating analysis output files..."
+          
+          if [ ! -f checkov-output.json ] || ! jq empty checkov-output.json 2>/dev/null; then
+            echo "⚠ Creating default checkov-output.json"
+            echo '{"results": {"failed_checks": [], "passed_checks": []}}' > checkov-output.json
+          fi
+          
+          if [ ! -f infracost-output.json ] || ! jq empty infracost-output.json 2>/dev/null; then
+            echo "⚠ Creating default infracost-output.json"
+            echo '{"totalMonthlyCost": 0, "projects": []}' > infracost-output.json
+          fi
+          
+          echo "✓ All required files validated"
         shell: bash
 
-      # ====================================================================
-      # AI-POWERED DEEP ANALYSIS — CLAUDE
-      # FIX: switched from Gemini (broken model names) to Claude via Anthropic SDK
-      # ====================================================================
-
-      - name: Run Deep Analysis (Claude AI)
+      - name: Run Deep Analysis (Gemini + AI)
         id: deep_analysis
         env:
-          # FIX: was GEMINI_API_KEY — now uses ANTHROPIC_API_KEY
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          echo "Running AI-powered deep analysis with Claude..."
-
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "ERROR: ANTHROPIC_API_KEY not set"
-            echo "Add ANTHROPIC_API_KEY to GitHub repository secrets"
-            # Write a minimal report so the PR comment step still runs
-            echo "# Infrastructure Analysis\n\nANTHROPIC_API_KEY not configured — AI analysis skipped." \
-              > infrastructure-analysis-report.md
-            exit 0
+          echo "🧠 Running AI-powered deep analysis..."
+          
+          if [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
+            echo "❌ Error: GEMINI_API_KEY not set"
+            echo "Please add GEMINI_API_KEY to GitHub secrets"
+            exit 0  # Don't fail - allow workflow to continue for other checks
           fi
-
+          
           python scripts/local.py
-          echo "Deep analysis complete"
+          
+          echo "✓ Deep analysis complete"
         shell: bash
 
       # ====================================================================
-      # POST SUMMARY COMMENT TO PR
+      # GENERATE & POST REPORT
       # ====================================================================
+      
+      - name: Read Analysis Report
+        id: read_report
+        if: success()
+        run: |
+          if [ -f infrastructure-analysis-report.md ]; then
+            echo "report_exists=true" >> $GITHUB_OUTPUT
+            # Read report and prepare for comment (limit size for GitHub comment)
+            REPORT=$(cat infrastructure-analysis-report.md | head -c 65000)
+            echo "report_content=$(echo "$REPORT" | base64 -w 0)" >> $GITHUB_OUTPUT
+          else
+            echo "report_exists=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
 
       - name: Post Summary Comment to PR
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.read_report.outputs.report_exists == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             const reportPath = 'infrastructure-analysis-report.md';
-            if (!fs.existsSync(reportPath)) {
-              console.log('No report file found — skipping PR comment.');
-              return;
-            }
+            if (!fs.existsSync(reportPath)) return;
 
             const report = fs.readFileSync(reportPath, 'utf8');
-
-            // FIX: truncate cleanly on a section boundary, not mid-byte
-            const maxLength = 64000;
-            let body = report;
-            if (report.length > maxLength) {
-              let cutoff = report.lastIndexOf('\n---\n', maxLength);
-              if (cutoff === -1) cutoff = report.lastIndexOf('\n', maxLength);
-              body = report.substring(0, cutoff > 0 ? cutoff : maxLength)
-                + '\n\n**[Report truncated — see workflow artifacts for full details]**';
-            }
-
-            // Delete previous bot comment if present (avoids stacking duplicate comments)
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            for (const c of comments) {
-              if (c.user.type === 'Bot' && c.body.includes('Infrastructure Analysis')) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: c.id,
-                });
-              }
-            }
+            const maxLength = 65000;
+            const body = report.length > maxLength
+              ? report.substring(0, maxLength) + '\n\n**[Report truncated — see artifacts for full details]**'
+              : report;
 
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body,
+              body
             });
-
-      # ====================================================================
-      # POST INLINE REVIEW COMMENTS (Files Changed tab)
-      # ====================================================================
 
       - name: Post Inline Review Comments to Files Changed
         if: github.event_name == 'pull_request'
@@ -237,7 +225,7 @@ jobs:
             });
             const commitId = pr.head.sha;
 
-            // Map from file path -> patch string for diff-position lookup
+            // patch line → diff position mapper
             const patchMap = Object.fromEntries(
               files.filter(f => f.patch).map(f => [f.filename, f.patch])
             );
@@ -261,8 +249,7 @@ jobs:
 
             for (const c of comments) {
               let path = c.path;
-
-              // Normalise path: try as-is, then strip a leading directory segment
+              // normalise: try as-is, then strip leading dir segment
               if (!changedPaths.has(path)) {
                 const bare = path.replace(/^[^/]+\//, '');
                 if (changedPaths.has(bare)) path = bare;
@@ -293,7 +280,7 @@ jobs:
       # ====================================================================
       # UPLOAD ARTIFACTS
       # ====================================================================
-
+      
       - name: Upload Analysis Reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -308,30 +295,24 @@ jobs:
             inline-comments.json
           retention-days: 30
 
-      # ====================================================================
-      # STEP SUMMARY
-      # ====================================================================
-
       - name: Summary
         if: always()
         run: |
-          {
-            echo "## Infrastructure Analysis Summary"
-            echo ""
-            echo "### Checkov Security Analysis"
-            echo "- Failed checks: ${{ steps.checkov.outputs.checkov_failed }}"
-            echo "- Passed checks: ${{ steps.checkov.outputs.checkov_passed }}"
-            echo ""
-            echo "### Infracost Cost Analysis"
-            echo "- Monthly cost estimate: \$${{ steps.infracost.outputs.infracost_total }}"
-            echo ""
-            echo "### AI Deep Analysis (Claude)"
-            if [ -f infrastructure-analysis-report.md ]; then
-              echo "- Report generated successfully"
-            else
-              echo "- Report generation skipped (check ANTHROPIC_API_KEY)"
-            fi
-            echo ""
-            echo "### Artifacts"
-            echo "- All reports available in workflow artifacts for 30 days"
-          } >> $GITHUB_STEP_SUMMARY
+          echo "## 📋 Analysis Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Checkov Security Analysis**" >> $GITHUB_STEP_SUMMARY
+          echo "- Failed checks: ${{ steps.checkov.outputs.checkov_failed }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Passed checks: ${{ steps.checkov.outputs.checkov_passed }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "💰 **Infracost Cost Analysis**" >> $GITHUB_STEP_SUMMARY
+          echo "- Monthly cost estimate: \$${{ steps.infracost.outputs.infracost_total }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🧠 **AI-Powered Deep Analysis**" >> $GITHUB_STEP_SUMMARY
+          if [ -f infrastructure-analysis-report.md ]; then
+            echo "- ✓ Report generated successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ⚠ Report generation skipped (check API key)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📊 **Artifacts**" >> $GITHUB_STEP_SUMMARY
+          echo "- All reports available in workflow artifacts" >> $GITHUB_STEP_SUMMARY
