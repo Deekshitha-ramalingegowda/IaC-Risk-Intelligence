@@ -193,7 +193,6 @@ jobs:
             });
 
       - name: Post Inline Review Comments to Files Changed
-        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -202,21 +201,15 @@ jobs:
 
             const inlinePath = 'inline-comments.json';
             if (!fs.existsSync(inlinePath)) {
-              console.log('❌ No inline-comments.json found — skipping.');
+              console.log('No inline-comments.json found — skipping.');
               return;
             }
 
             const comments = JSON.parse(fs.readFileSync(inlinePath, 'utf8'));
-            if (!comments.length) {
-              console.log('❌ No inline comments to post.');
-              return;
-            }
 
-            // Get PR details
             const { owner, repo } = context.repo;
             const pull_number = context.issue.number;
 
-            // Get changed files in PR
             const { data: files } = await github.rest.pulls.listFiles({
               owner,
               repo,
@@ -226,7 +219,18 @@ jobs:
 
             const changedFiles = new Set(files.map(f => f.filename));
 
-            // Get latest commit SHA
+            console.log("📂 Changed files:", [...changedFiles]);
+
+            // ✅ DEFINE FUNCTION HERE (BEFORE LOOP)
+            function findMatchingPath(inputPath, changedFiles) {
+              for (const file of changedFiles) {
+                if (file.endsWith(inputPath.split('/').pop())) {
+                  return file;
+                }
+              }
+              return null;
+            }
+
             const { data: pr } = await github.rest.pulls.get({
               owner,
               repo,
@@ -238,38 +242,44 @@ jobs:
             let posted = 0;
             let skipped = 0;
 
+            // ✅ USE FUNCTION HERE
             for (const c of comments) {
-            let path = c.path;
+              let path = c.path;
 
-            // 🔥 USE NEW MATCHING FUNCTION
-            const matchedPath = findMatchingPath(path, changedFiles);
+              const matchedPath = findMatchingPath(path, changedFiles);
 
-            if (!matchedPath) {
-              console.log(`⚠ Skipping (file not in PR): ${path}`);
-              continue;
+              if (!matchedPath) {
+                console.log(`⚠ Skipping (file not in PR): ${path}`);
+                skipped++;
+                continue;
+              }
+
+              path = matchedPath;
+
+              try {
+                console.log(`➡ Posting comment on ${path}:${c.line}`);
+
+                await github.rest.pulls.createReviewComment({
+                  owner,
+                  repo,
+                  pull_number,
+                  commit_id: commitId,
+                  path,
+                  line: c.line,
+                  side: "RIGHT",
+                  body: c.body,
+                });
+
+                posted++;
+
+              } catch (err) {
+                console.log(`❌ Failed for ${path}:${c.line}`);
+                console.log(err.message);
+                skipped++;
+              }
             }
 
-            path = matchedPath;
-
-            try {
-              console.log(`➡ Posting comment on ${path}:${c.line}`);
-
-              await github.rest.pulls.createReviewComment({
-                owner,
-                repo,
-                pull_number,
-                commit_id: commitId,
-                path: path,
-                line: c.line,
-                side: "RIGHT",
-                body: c.body,
-              });
-
-            } catch (err) {
-              console.log(`❌ Failed for ${path}:${c.line}`);
-              console.log(err.message);
-            }
-            }
+            console.log(`✅ Inline comments: ${posted} posted, ${skipped} skipped.`);
 
       # ====================================================================
       # UPLOAD ARTIFACTS
