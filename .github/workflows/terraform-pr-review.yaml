@@ -193,6 +193,7 @@ jobs:
             });
 
       - name: Post Inline Review Comments to Files Changed
+        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -201,15 +202,20 @@ jobs:
 
             const inlinePath = 'inline-comments.json';
             if (!fs.existsSync(inlinePath)) {
-              console.log('No inline-comments.json found — skipping.');
+              console.log('❌ No inline-comments.json found — skipping.');
               return;
             }
 
             const comments = JSON.parse(fs.readFileSync(inlinePath, 'utf8'));
+            if (!comments.length) {
+              console.log('❌ No inline comments to post.');
+              return;
+            }
 
             const { owner, repo } = context.repo;
             const pull_number = context.issue.number;
 
+            // Get changed files
             const { data: files } = await github.rest.pulls.listFiles({
               owner,
               repo,
@@ -218,10 +224,9 @@ jobs:
             });
 
             const changedFiles = new Set(files.map(f => f.filename));
-
             console.log("📂 Changed files:", [...changedFiles]);
 
-            // ✅ DEFINE FUNCTION HERE (BEFORE LOOP)
+            // 🔥 FUNCTION: Match AI path → PR file
             function findMatchingPath(inputPath, changedFiles) {
               for (const file of changedFiles) {
                 if (file.endsWith(inputPath.split('/').pop())) {
@@ -231,6 +236,41 @@ jobs:
               return null;
             }
 
+            // 🔥 FUNCTION: Get valid diff lines
+            function getValidLinesFromPatch(patch) {
+              const validLines = new Set();
+              let newLine = 0;
+
+              for (const line of patch.split('\n')) {
+                if (line.startsWith('@@')) {
+                  const match = line.match(/\+(\d+)/);
+                  if (match) {
+                    newLine = parseInt(match[1]) - 1;
+                  }
+                  continue;
+                }
+
+                if (!line.startsWith('-')) {
+                  newLine++;
+                }
+
+                if (line.startsWith('+') || line.startsWith(' ')) {
+                  validLines.add(newLine);
+                }
+              }
+
+              return validLines;
+            }
+
+            // 🔥 Build patch map
+            const patchMap = {};
+            for (const f of files) {
+              if (f.patch) {
+                patchMap[f.filename] = getValidLinesFromPatch(f.patch);
+              }
+            }
+
+            // Get latest commit SHA
             const { data: pr } = await github.rest.pulls.get({
               owner,
               repo,
@@ -242,10 +282,10 @@ jobs:
             let posted = 0;
             let skipped = 0;
 
-            // ✅ USE FUNCTION HERE
             for (const c of comments) {
               let path = c.path;
 
+              // ✅ Match file path
               const matchedPath = findMatchingPath(path, changedFiles);
 
               if (!matchedPath) {
@@ -255,6 +295,15 @@ jobs:
               }
 
               path = matchedPath;
+
+              // ✅ Validate line is in diff
+              const validLines = patchMap[path];
+
+              if (!validLines || !validLines.has(c.line)) {
+                console.log(`⚠ Skipping (line not in diff): ${path}:${c.line}`);
+                skipped++;
+                continue;
+              }
 
               try {
                 console.log(`➡ Posting comment on ${path}:${c.line}`);
@@ -271,6 +320,12 @@ jobs:
                 });
 
                 posted++;
+
+                // Prevent API spam
+                if (posted >= 20) {
+                  console.log('⚠ Limit reached (20 comments), stopping...');
+                  break;
+                }
 
               } catch (err) {
                 console.log(`❌ Failed for ${path}:${c.line}`);
