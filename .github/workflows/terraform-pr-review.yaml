@@ -215,7 +215,7 @@ jobs:
             const { owner, repo } = context.repo;
             const pull_number = context.issue.number;
 
-            // Get changed files
+            // 🔍 Get changed files
             const { data: files } = await github.rest.pulls.listFiles({
               owner,
               repo,
@@ -226,7 +226,7 @@ jobs:
             const changedFiles = new Set(files.map(f => f.filename));
             console.log("📂 Changed files:", [...changedFiles]);
 
-            // 🔥 FUNCTION: Match AI path → PR file
+            // 🔥 Match AI path → PR file
             function findMatchingPath(inputPath, changedFiles) {
               for (const file of changedFiles) {
                 if (file.endsWith(inputPath.split('/').pop())) {
@@ -236,41 +236,7 @@ jobs:
               return null;
             }
 
-            // 🔥 FUNCTION: Get valid diff lines
-            function getValidLinesFromPatch(patch) {
-              const validLines = new Set();
-              let newLine = 0;
-
-              for (const line of patch.split('\n')) {
-                if (line.startsWith('@@')) {
-                  const match = line.match(/\+(\d+)/);
-                  if (match) {
-                    newLine = parseInt(match[1]) - 1;
-                  }
-                  continue;
-                }
-
-                if (!line.startsWith('-')) {
-                  newLine++;
-                }
-
-                if (line.startsWith('+') || line.startsWith(' ')) {
-                  validLines.add(newLine);
-                }
-              }
-
-              return validLines;
-            }
-
-            // 🔥 Build patch map
-            const patchMap = {};
-            for (const f of files) {
-              if (f.patch) {
-                patchMap[f.filename] = getValidLinesFromPatch(f.patch);
-              }
-            }
-
-            // Get latest commit SHA
+            // 🔍 Get latest commit SHA
             const { data: pr } = await github.rest.pulls.get({
               owner,
               repo,
@@ -296,17 +262,21 @@ jobs:
 
               path = matchedPath;
 
-              // ✅ Validate line is in diff
-              const validLines = patchMap[path];
-
-              if (!validLines || !validLines.has(c.line)) {
-                console.log(`⚠ Skipping (line not in diff): ${path}:${c.line}`);
+              // 🔍 Get patch
+              const fileData = files.find(f => f.filename === path);
+              if (!fileData || !fileData.patch) {
+                console.log(`⚠ No patch found for ${path}`);
                 skipped++;
                 continue;
               }
 
+              const patchLines = fileData.patch.split('\n');
+
+              // 🔥 Use last valid position (safe fallback)
+              const position = patchLines.length - 1;
+
               try {
-                console.log(`➡ Posting comment on ${path}:${c.line}`);
+                console.log(`➡ Posting comment on ${path} (position: ${position})`);
 
                 await github.rest.pulls.createReviewComment({
                   owner,
@@ -314,21 +284,20 @@ jobs:
                   pull_number,
                   commit_id: commitId,
                   path,
-                  line: c.line,
-                  side: "RIGHT",
+                  position: position,
                   body: c.body,
                 });
 
                 posted++;
 
-                // Prevent API spam
+                // 🚫 Prevent API spam
                 if (posted >= 20) {
                   console.log('⚠ Limit reached (20 comments), stopping...');
                   break;
                 }
 
               } catch (err) {
-                console.log(`❌ Failed for ${path}:${c.line}`);
+                console.log(`❌ Failed for ${path}`);
                 console.log(err.message);
                 skipped++;
               }
