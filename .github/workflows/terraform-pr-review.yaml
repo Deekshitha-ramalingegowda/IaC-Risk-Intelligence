@@ -239,50 +239,37 @@ jobs:
             let skipped = 0;
 
             for (const c of comments) {
-              let path = c.path;
+            let path = c.path;
 
-              // Normalize path (handle terraform/ prefix issues)
-              if (!changedFiles.has(path)) {
-                const altPath = path.replace(/^.*?\//, '');
-                if (changedFiles.has(altPath)) {
-                  path = altPath;
-                } else {
-                  console.log(`⚠ Skipping (file not in PR): ${c.path}`);
-                  skipped++;
-                  continue;
-                }
-              }
+            // 🔥 USE NEW MATCHING FUNCTION
+            const matchedPath = findMatchingPath(path, changedFiles);
 
-              try {
-                console.log(`➡ Posting comment on ${path}:${c.line}`);
-
-                await github.rest.pulls.createReviewComment({
-                  owner,
-                  repo,
-                  pull_number,
-                  commit_id: commitId,
-                  path: path,
-                  line: c.line,
-                  side: "RIGHT",   // IMPORTANT
-                  body: c.body,
-                });
-
-                posted++;
-
-                // Prevent API spam / rate limit
-                if (posted >= 20) {
-                  console.log('⚠ Limit reached (20 comments), stopping...');
-                  break;
-                }
-
-              } catch (err) {
-                console.log(`❌ Failed for ${path}:${c.line}`);
-                console.log(err.message);
-                skipped++;
-              }
+            if (!matchedPath) {
+              console.log(`⚠ Skipping (file not in PR): ${path}`);
+              continue;
             }
 
-            console.log(`✅ Inline comments: ${posted} posted, ${skipped} skipped.`);
+            path = matchedPath;
+
+            try {
+              console.log(`➡ Posting comment on ${path}:${c.line}`);
+
+              await github.rest.pulls.createReviewComment({
+                owner,
+                repo,
+                pull_number,
+                commit_id: commitId,
+                path: path,
+                line: c.line,
+                side: "RIGHT",
+                body: c.body,
+              });
+
+            } catch (err) {
+              console.log(`❌ Failed for ${path}:${c.line}`);
+              console.log(err.message);
+            }
+            }
 
       # ====================================================================
       # UPLOAD ARTIFACTS
