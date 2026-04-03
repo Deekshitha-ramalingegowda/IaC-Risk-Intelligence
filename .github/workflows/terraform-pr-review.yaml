@@ -199,83 +199,90 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
+
             const inlinePath = 'inline-comments.json';
             if (!fs.existsSync(inlinePath)) {
-              console.log('No inline-comments.json — skipping.');
+              console.log('❌ No inline-comments.json found — skipping.');
               return;
             }
 
             const comments = JSON.parse(fs.readFileSync(inlinePath, 'utf8'));
-            if (!comments.length) { console.log('No inline comments.'); return; }
-
-            // Files actually changed in this PR
-            const { data: files } = await github.rest.pulls.listFiles({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-              per_page: 100,
-            });
-            const changedPaths = new Set(files.map(f => f.filename));
-
-            // Latest commit SHA on the PR branch
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-            });
-            const commitId = pr.head.sha;
-
-            // patch line → diff position mapper
-            const patchMap = Object.fromEntries(
-              files.filter(f => f.patch).map(f => [f.filename, f.patch])
-            );
-
-            function getDiffPosition(patch, targetLine) {
-              let diffPos = 0, newLine = 0;
-              for (const l of patch.split('\n')) {
-                diffPos++;
-                if (l.startsWith('@@')) {
-                  const m = l.match(/\+(\d+)/);
-                  if (m) newLine = parseInt(m[1]) - 1;
-                  continue;
-                }
-                if (!l.startsWith('-')) newLine++;
-                if (newLine === targetLine && !l.startsWith('-')) return diffPos;
-              }
-              return null;
+            if (!comments.length) {
+              console.log('❌ No inline comments to post.');
+              return;
             }
 
-            let posted = 0, skipped = 0;
+            // Get PR details
+            const { owner, repo } = context.repo;
+            const pull_number = context.issue.number;
+
+            // Get changed files in PR
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner,
+              repo,
+              pull_number,
+              per_page: 100,
+            });
+
+            const changedFiles = new Set(files.map(f => f.filename));
+
+            // Get latest commit SHA
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number,
+            });
+
+            const commitId = pr.head.sha;
+
+            let posted = 0;
+            let skipped = 0;
 
             for (const c of comments) {
               let path = c.path;
-              // normalise: try as-is, then strip leading dir segment
-              if (!changedPaths.has(path)) {
-                const bare = path.replace(/^[^/]+\//, '');
-                if (changedPaths.has(bare)) path = bare;
-                else { skipped++; continue; }
+
+              // Normalize path (handle terraform/ prefix issues)
+              if (!changedFiles.has(path)) {
+                const altPath = path.replace(/^.*?\//, '');
+                if (changedFiles.has(altPath)) {
+                  path = altPath;
+                } else {
+                  console.log(`⚠ Skipping (file not in PR): ${c.path}`);
+                  skipped++;
+                  continue;
+                }
               }
 
-              const position = getDiffPosition(patchMap[path] || '', c.line);
-              if (!position) { skipped++; continue; }
-
               try {
+                console.log(`➡ Posting comment on ${path}:${c.line}`);
+
                 await github.rest.pulls.createReviewComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: context.issue.number,
+                  owner,
+                  repo,
+                  pull_number,
                   commit_id: commitId,
-                  path,
-                  position,
+                  path: path,
+                  line: c.line,
+                  side: "RIGHT",   // IMPORTANT
                   body: c.body,
                 });
+
                 posted++;
+
+                // Prevent API spam / rate limit
+                if (posted >= 20) {
+                  console.log('⚠ Limit reached (20 comments), stopping...');
+                  break;
+                }
+
               } catch (err) {
-                console.log(`  Skip ${path}:${c.line} — ${err.message}`);
+                console.log(`❌ Failed for ${path}:${c.line}`);
+                console.log(err.message);
                 skipped++;
               }
             }
-            console.log(`Inline comments: ${posted} posted, ${skipped} skipped.`);
+
+            console.log(`✅ Inline comments: ${posted} posted, ${skipped} skipped.`);
 
       # ====================================================================
       # UPLOAD ARTIFACTS
