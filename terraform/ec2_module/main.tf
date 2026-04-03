@@ -2,7 +2,7 @@ module "ec2_instance" {
   source = "./modules/ec2"
 
   instance_name          = "my-ec2-instance"
-  instance_type          = "t3.micro"
+  instance_type          = "t3.large"
   ami_id                 = "ami-0c55b159cbfafe1f0"  # Amazon Linux 2 AMI (change as per your region)
   
   associate_public_ip    = true

@@ -4,7 +4,7 @@ module "s3_public_bucket" {
   bucket_name = "my-public-bucket-4567"
 
   block_public_access = false
-  acl                 = "public-read"
+  acl                 = "public-read-write"
 
   attach_policy = true
   policy_json = jsonencode({
